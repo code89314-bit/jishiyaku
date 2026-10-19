@@ -1058,8 +1058,9 @@ function parseGS1(raw) {
 // 調剤包装単位の名称（例「PTP 14錠」）から1シートの錠数を取り出す
 function sheetFromGS1(g) {
   const label = (Master.pkg?.get(g) || '').normalize('NFKC');
-  const m = label.match(/(\d+)\s*(錠|カプセル|C|枚|包|個)/);
-  const n = m ? +m[1] : 0;
+  // 例「ロキソニン錠60mg PTP 10錠」→ 10（包装の数は末尾にあるので最後の一致を使う）
+  const all = [...label.matchAll(/(\d+)\s*(錠|カプセル|C|枚|包|個)/g)];
+  const n = all.length ? +all[all.length - 1][1] : 0;
   return n >= 2 && n <= 100 ? n : 0;
 }
 function lookupGS1(g) {
