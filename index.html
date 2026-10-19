@@ -1,0 +1,2157 @@
+<!doctype html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="持参薬鑑別">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#0e6a5a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon.png">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
+</head><body>
+<title>持参薬鑑別サポート</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=Zen+Kaku+Gothic+New:wght@500;700&display=swap">
+<style>
+/* Layout: 薬袋の仕分けトレイ — 医療機関ごとの区画に薬が並び、数量は右端の帳簿欄。入力は全画面のパネル。 */
+:root {
+  --bg: #eef2ef;
+  --surface: #ffffff;
+  --ink: #18221e;
+  --muted: #5a6962;
+  --line: #d5ddd8;
+  --accent: #0e6a5a;
+  --accent-ink: #ffffff;
+  --accent-soft: #d9ede7;
+  --warn: #b1432a;
+  --warn-soft: #f7e1da;
+  --pack: #94590a;
+  --pack-soft: #f5e6cf;
+  --font-body: "BIZ UDPGothic", "Hiragino Sans", "Hiragino Kaku Gothic ProN", system-ui, sans-serif;
+  --font-display: "Zen Kaku Gothic New", "Hiragino Sans", system-ui, sans-serif;
+  --r: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111614; --surface: #1a211e; --ink: #e5ece8; --muted: #98a69f; --line: #2b3531;
+    --accent: #4dbda4; --accent-ink: #052019; --accent-soft: #163630;
+    --warn: #ee8b6d; --warn-soft: #3a211a; --pack: #e2a650; --pack-soft: #3a2c16;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111614; --surface: #1a211e; --ink: #e5ece8; --muted: #98a69f; --line: #2b3531;
+  --accent: #4dbda4; --accent-ink: #052019; --accent-soft: #163630;
+  --warn: #ee8b6d; --warn-soft: #3a211a; --pack: #e2a650; --pack-soft: #3a2c16;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+body.locked { overflow: hidden; }
+body::before {
+  content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px);
+  z-index: 10; background: var(--bg);
+}
+button, input, textarea { font: inherit; color: inherit; }
+button { touch-action: manipulation; -webkit-user-select: none; user-select: none; cursor: pointer; }
+input, textarea { font-size: 16px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.num, .tab { font-variant-numeric: tabular-nums; }
+
+/* buttons */
+.btn {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 10px;
+  min-height: 44px; padding: 0 14px; font-weight: 700;
+}
+.btn:active { transform: scale(.97); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.danger { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--accent); padding: 0 6px; }
+.btn:disabled { opacity: .4; }
+
+/* top */
+.top-wrap {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.top, .searchwrap, main, .bottom-inner {
+  max-width: 720px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.top { display: flex; align-items: center; gap: 8px; padding-block: 8px; }
+.top h1 {
+  flex: 1; margin: 0; font-family: var(--font-display); font-size: 18px; font-weight: 700;
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.top-actions { display: flex; gap: 6px; }
+.searchwrap { padding-block: 0 10px; }
+.searchwrap input {
+  width: 100%; height: 40px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--surface); padding: 0 12px;
+}
+
+/* list */
+main { padding-block: 12px 220px; display: flex; flex-direction: column; gap: 18px; }
+.clinic h2, .group-title {
+  margin: 0 0 6px; font-family: var(--font-display); font-size: 14px; font-weight: 700;
+  color: var(--muted); letter-spacing: .04em; display: flex; align-items: center; gap: 6px;
+}
+.clinic h2::before {
+  content: ""; width: 10px; height: 10px; border-radius: 2px; background: var(--accent);
+  flex: none;
+}
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.row {
+  display: flex; align-items: center; gap: 10px; padding: 12px; min-height: 64px;
+  border-top: 1px solid var(--line); cursor: pointer;
+}
+.row:first-child { border-top: 0; }
+.row:active { background: var(--accent-soft); }
+.row.sel { background: var(--accent-soft); }
+.check {
+  flex: none; width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--muted);
+  display: grid; place-items: center; font-weight: 700; color: var(--accent-ink);
+}
+.row.sel .check { background: var(--accent); border-color: var(--accent); }
+.info { flex: 1; min-width: 0; }
+.dname { font-weight: 700; overflow-wrap: anywhere; }
+.sub { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.tag { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; background: var(--pack-soft); color: var(--pack); font-weight: 700; }
+.qty { text-align: right; flex: none; min-width: 56px; }
+.qty .num { font-family: var(--font-display); font-size: 22px; font-weight: 700; line-height: 1.1; }
+.qty .u { font-size: 12px; margin-left: 1px; color: var(--muted); }
+.qty .bd { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.qty .none { color: var(--line); font-size: 20px; }
+.qty.bump .num { animation: bump .35s ease; color: var(--accent); }
+@keyframes bump { 0% { transform: scale(1.25); } 100% { transform: scale(1); } }
+.quick {
+  flex: none; min-width: 52px; height: 40px; border-radius: 99px; border: 1px solid var(--accent);
+  background: var(--accent-soft); color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.quick:active { background: var(--accent); color: var(--accent-ink); }
+.pack-card { padding: 12px; display: grid; gap: 2px; border-top: 1px solid var(--line); cursor: pointer; }
+.pack-card:first-child { border-top: 0; }
+.pack-card .ph { display: flex; justify-content: space-between; gap: 8px; font-weight: 700; }
+.pack-card .ph b { color: var(--pack); font-variant-numeric: tabular-nums; }
+
+.empty { text-align: center; padding: 48px 8px; display: grid; gap: 14px; justify-items: center; }
+.empty h2 { font-family: var(--font-display); margin: 0; font-size: 20px; }
+.empty p { margin: 0; color: var(--muted); max-width: 32em; }
+.empty .acts { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+/* bottom bar */
+.bottom {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
+  background: var(--surface); border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.bottom-inner { padding-block: 8px; display: grid; gap: 8px; }
+.recent { display: flex; gap: 8px; overflow-x: auto; align-items: center; scrollbar-width: none; }
+.recent::-webkit-scrollbar { display: none; }
+.recent .lbl { font-size: 11px; color: var(--muted); flex: none; letter-spacing: .06em; }
+.chip {
+  flex: none; max-width: 160px; text-align: left; border: 1px solid var(--line); background: var(--bg);
+  border-radius: 10px; padding: 5px 10px; line-height: 1.25;
+}
+.chip b { display: block; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip span { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.undo { display: flex; align-items: center; gap: 10px; }
+.undo .msg { flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.undo .msg::before { content: "＋ "; color: var(--accent); font-weight: 700; }
+
+/* panel */
+.panel {
+  position: fixed; inset: 0; z-index: 20; background: var(--bg);
+  display: flex; flex-direction: column;
+}
+.phead {
+  padding-top: env(safe-area-inset-top, 0px); background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.phead-inner, .pbody-inner, .pfoot-inner {
+  max-width: 720px; margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.phead-inner { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding-block: 6px; gap: 8px; }
+.phead-inner h2 { margin: 0; font-family: var(--font-display); font-size: 17px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60vw; }
+.phead-inner .r { justify-self: end; }
+.phead-inner .l { justify-self: start; }
+.pbody { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.pbody-inner { padding-block: 14px 32px; display: grid; gap: 16px; }
+.pfoot { border-top: 1px solid var(--line); background: var(--surface); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.pfoot-inner { padding-block: 10px; display: flex; gap: 10px; align-items: center; }
+.pfoot-inner .btn { flex: 1; min-height: 50px; }
+.pfoot-inner .pos { flex: none; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.block { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; display: grid; gap: 10px; }
+.block h3 { margin: 0; font-size: 13px; color: var(--muted); font-weight: 700; letter-spacing: .04em; }
+.block h3 small { font-weight: 400; margin-left: 6px; }
+
+.hero { display: grid; gap: 2px; }
+.hero .cl { font-size: 12px; color: var(--muted); }
+.hero .nm { font-family: var(--font-display); font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
+.hero .inf { font-size: 13px; color: var(--muted); }
+.total { display: flex; align-items: baseline; gap: 6px; margin-top: 6px; }
+.total .t-l { color: var(--muted); font-size: 13px; }
+.total .t-n { font-family: var(--font-display); font-size: 52px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.total .t-u { font-size: 18px; }
+.total.bump .t-n { animation: bump .3s ease; color: var(--accent); }
+.bdl { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; min-height: 1.4em; }
+
+.sizes { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.seg { min-width: 48px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-weight: 700; font-variant-numeric: tabular-nums; }
+.seg.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.stepper { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.stepper .v { min-width: 3.2em; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stepper button { width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 18px; }
+.sheetbtns { display: grid; grid-template-columns: 84px 1fr; gap: 10px; }
+.sheetbtns .btn { min-height: 64px; font-size: 18px; }
+.grid5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.grid5 button { height: 52px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.grid5 button:active, .seg:active, .stepper button:active { background: var(--accent-soft); }
+.other { display: flex; gap: 8px; }
+.other input { flex: 1; min-width: 0; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); padding: 0 12px; }
+
+.entries { display: grid; }
+.entry { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.entry:first-child { border-top: 0; }
+.entry .e-l { flex: 1; }
+.entry .e-t { font-size: 12px; color: var(--muted); }
+.entry button { width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--line); background: var(--bg); color: var(--warn); font-size: 16px; }
+.muted { color: var(--muted); font-size: 13px; margin: 0; }
+
+.field { display: grid; gap: 4px; }
+.field label { font-size: 12px; color: var(--muted); }
+.field input, .field textarea, .txt {
+  width: 100%; border-radius: 10px; border: 1px solid var(--line); background: var(--bg);
+  padding: 9px 12px; min-height: 44px;
+}
+.field textarea { resize: vertical; min-height: 44px; }
+
+.steps { margin: 0; padding-left: 1.4em; display: grid; gap: 6px; font-size: 14px; }
+.steps b { color: var(--accent); }
+.scanbox { width: 100%; min-height: 42vh; border-radius: var(--r); border: 2px dashed var(--accent); background: var(--surface); padding: 12px; line-height: 1.6; }
+.inline { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.rv-clinic { display: grid; gap: 10px; }
+.rv-head { display: flex; gap: 8px; align-items: center; }
+.rv-head input { flex: 1; min-width: 0; font-weight: 700; }
+.rv-drug { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 6px; }
+.rv-drug .rv-top { display: flex; gap: 8px; }
+.rv-drug .rv-top input { flex: 1; min-width: 0; font-weight: 700; }
+.rv-pair { display: grid; grid-template-columns: 2.6em 1fr; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.x { flex: none; width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--warn); }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
+
+.timing { display: grid; grid-template-columns: 3.6em 44px 1fr 44px; gap: 8px; align-items: center; }
+.timing .tl { font-weight: 700; font-family: var(--font-display); }
+.timing input { height: 44px; text-align: center; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.timing button { height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 20px; }
+.timing button.plus { background: var(--pack-soft); border-color: var(--pack); color: var(--pack); }
+.pk-total { text-align: right; font-weight: 700; color: var(--pack); font-variant-numeric: tabular-nums; }
+.pick { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer; }
+.pick:first-child { border-top: 0; }
+.pick.sel .check { background: var(--accent); border-color: var(--accent); }
+
+.confirm { background: var(--warn-soft); border: 1px solid var(--warn); border-radius: var(--r); padding: 12px; display: grid; gap: 10px; }
+.confirm p { margin: 0; font-weight: 700; color: var(--warn); }
+.menu-list { display: grid; gap: 10px; }
+.menu-list .btn { text-align: left; min-height: 52px; }
+
+.tag.warn { background: var(--warn-soft); color: var(--warn); }
+.okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
+.warnline { margin: 0; color: var(--warn); font-weight: 700; }
+.cands { display: grid; gap: 6px; }
+.cand {
+  display: grid; gap: 2px; text-align: left; width: 100%; padding: 10px 12px; min-height: 48px;
+  border-radius: 10px; border: 1px solid var(--line); background: var(--bg);
+}
+.cand:active { background: var(--accent-soft); }
+.cand .cn { font-weight: 700; overflow-wrap: anywhere; }
+.cand .cs { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rv-badge { font-size: 12px; }
+.rv-badge.ok { color: var(--accent); }
+.rv-badge.ng { color: var(--warn); }
+.filepick { display: grid; gap: 8px; }
+.filepick input[type=file] { font-size: 14px; }
+.ocr-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ocr-btns .btn { min-height: 56px; font-size: 16px; display: grid; place-items: center; text-align: center; }
+.filebtn { cursor: pointer; }
+.ocr-status { display: grid; gap: 6px; }
+.ocr-bar { height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.ocr-bar span { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+.cam {
+  position: fixed; inset: 0; z-index: 40; background: #000; display: flex; flex-direction: column;
+}
+.cam video { flex: 1; min-height: 0; width: 100%; object-fit: cover; background: #000; }
+.cam .guide {
+  position: absolute; left: max(20px, env(safe-area-inset-left, 0px)); right: max(20px, env(safe-area-inset-right, 0px));
+  top: calc(env(safe-area-inset-top, 0px) + 70px); bottom: calc(env(safe-area-inset-bottom, 0px) + 150px);
+  border: 2px dashed rgba(255,255,255,.85); border-radius: 14px; pointer-events: none;
+}
+.cam .cam-top {
+  position: absolute; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
+  color: #fff; font-size: 13px;
+}
+.cam .cam-top button, .cam .cam-bottom .side {
+  background: rgba(0,0,0,.5); color: #fff; border: 1px solid rgba(255,255,255,.4); border-radius: 99px; min-height: 44px; padding: 0 16px; font-weight: 700;
+}
+.cam .cam-bottom {
+  position: absolute; bottom: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center;
+  padding: 16px max(24px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 20px) max(24px, env(safe-area-inset-left, 0px));
+}
+.cam .shutter { width: 78px; height: 78px; border-radius: 50%; border: 5px solid rgba(255,255,255,.6); background: #fff; background-clip: padding-box; }
+.cam .shutter:active { transform: scale(.94); }
+.cam .cam-msg { position: absolute; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom, 0px) + 120px); text-align: center; color: #fff; font-weight: 700; text-shadow: 0 1px 3px #000; }
+.cam .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
+.cam .flash.on { opacity: .6; transition: none; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="top-wrap">
+  <div class="top">
+    <button class="btn ghost" data-act="menu" id="menuBtn">メニュー</button>
+    <h1 id="topTitle" data-act="sessions" role="button" tabindex="0" title="患者の保存・再開" style="cursor:pointer">持参薬鑑別</h1>
+    <div class="top-actions">
+      <button class="btn ghost" data-act="packMode" id="packBtn">一包化</button>
+      <button class="btn primary" data-act="scan" id="scanBtn">読取</button>
+    </div>
+  </div>
+  <div class="searchwrap" id="searchWrap">
+    <input id="search" type="search" placeholder="薬品名で探す（ひらがな可）" autocomplete="off">
+  </div>
+</div>
+<main id="list"></main>
+<div class="bottom" id="bottom" hidden><div class="bottom-inner" id="bottomInner"></div></div>
+
+<div class="panel" id="panel" hidden role="dialog" aria-modal="true">
+  <div class="phead"><div class="phead-inner" id="phead"></div></div>
+  <div class="pbody" id="pbody"><div class="pbody-inner" id="pbodyInner"></div></div>
+  <div class="pfoot" id="pfoot"><div class="pfoot-inner" id="pfootInner"></div></div>
+</div>
+
+<div class="cam" id="cam" hidden role="dialog" aria-modal="true" aria-label="カメラ">
+  <video id="camVideo" playsinline muted autoplay></video>
+  <div class="guide"></div>
+  <div class="flash" id="camFlash"></div>
+  <div class="cam-top">
+    <button data-act="camClose">閉じる</button>
+    <span id="camCount">撮影 0枚</span>
+    <button data-act="camTorch" id="camTorchBtn">ライト</button>
+  </div>
+  <div class="cam-msg" id="camMsg">1ページずつ枠に合わせて撮影</div>
+  <div class="cam-bottom">
+    <span style="width:84px"></span>
+    <button class="shutter" data-act="camShot" aria-label="撮影（無音）"></button>
+    <button class="side" data-act="camClose">完了</button>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ================= データ ================= */
+const KEY = 'jishiyaku.v1';
+let state = { clinics: [], packs: [] };
+const ui = { recent: [], undo: [], packMode: false, selected: [], search: '', panel: null, scanText: '',
+             sid: '', label: '', createdAt: 0, reports: [] };
+
+// 入力中の患者は localStorage に即時保存、患者ごとの一覧（再開用）は IndexedDB に保存
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) {
+      const o = JSON.parse(raw);
+      if (o && o.state) state = o.state;
+      if (o && Array.isArray(o.recent)) ui.recent = o.recent;
+      if (o && typeof o.scanText === 'string') ui.scanText = o.scanText;
+      if (o && o.sid) { ui.sid = o.sid; ui.label = o.label || ''; ui.createdAt = o.createdAt || Date.now(); ui.reports = o.reports || []; }
+    }
+  } catch (e) { /* 保存領域が使えなくても動作は継続 */ }
+  if (!ui.sid) { ui.sid = uid(); ui.createdAt = Date.now(); }
+}
+function save() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify({ state, recent: ui.recent, scanText: ui.scanText,
+      sid: ui.sid, label: ui.label, createdAt: ui.createdAt, reports: ui.reports }));
+  } catch (e) {}
+  scheduleArchive();
+}
+
+let sessions = [], sessionsLoaded = false, archiveTimer = null;
+const isEmptySession = () => !state.clinics.length && !ui.reports.length && !ui.label.trim();
+function snapshot() {
+  return { id: ui.sid, label: ui.label, createdAt: ui.createdAt, updatedAt: Date.now(),
+           state: JSON.parse(JSON.stringify(state)), recent: ui.recent.slice(), reports: ui.reports.slice() };
+}
+async function archiveCurrent() {
+  if (!sessionsLoaded) return;
+  clearTimeout(archiveTimer);
+  sessions = sessions.filter(s => s.id !== ui.sid);
+  if (!isEmptySession()) sessions.unshift(snapshot());
+  sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  await idbSet('sessions', sessions);
+}
+function scheduleArchive() { clearTimeout(archiveTimer); archiveTimer = setTimeout(archiveCurrent, 800); }
+function clearCurrent() {
+  state = { clinics: [], packs: [] };
+  ui.recent = []; ui.undo = []; ui.reports = []; ui.label = ''; ui.scanText = ''; ui.search = ''; ui.note = '';
+  ui.sid = uid(); ui.createdAt = Date.now();
+  const s = document.getElementById('search'); if (s) s.value = '';
+}
+async function startNewSession() { await archiveCurrent(); clearCurrent(); save(); }
+async function resumeSession(id) {
+  const s = sessions.find(x => x.id === id); if (!s) return;
+  await archiveCurrent();
+  clearCurrent();
+  state = JSON.parse(JSON.stringify(s.state));
+  ui.recent = s.recent || []; ui.reports = s.reports || []; ui.label = s.label || '';
+  ui.sid = s.id; ui.createdAt = s.createdAt || Date.now();
+  save();
+}
+async function deleteSession(id) {
+  sessions = sessions.filter(s => s.id !== id);
+  await idbSet('sessions', sessions);
+  if (id === ui.sid) { clearCurrent(); save(); }
+}
+const fmtTime = t => new Date(t).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const drugCount = st => (st.clinics || []).reduce((a, c) => a + c.drugs.length, 0);
+
+const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const qty = n => String(Math.round(n * 100) / 100);
+const $ = s => document.querySelector(s);
+
+const displayName = d => (d.name || '').trim() || '（名称未入力）';
+/* 外用薬：自動判定（薬品情報の切替で上書き可）。数量は「未開封◯本」「使いかけ◯本」で数える */
+const EXT_RE = /(テープ|パップ|貼付|湿布|軟膏|クリーム|ローション|ゲル|点眼|点鼻|点耳|吸入|エアゾール|坐剤|坐薬|スプレー|噴霧|外用|塗布|患部|挿入)/;
+function isExt(d) { return typeof d.ext === 'boolean' ? d.ext : EXT_RE.test((d.name || '') + (d.usage || '')); }
+function extUnit(d) {
+  if (d.extUnit) return d.extUnit;
+  const s = (d.name || '') + (d.usage || '');
+  if (/(テープ|パップ|貼付|湿布)/.test(s)) return '袋';
+  if (/(坐剤|坐薬)/.test(s)) return '個';
+  return '本';
+}
+function extCounts(d) {
+  let full = 0, open = 0;
+  for (const e of d.entries) { if (e.ext === 'open') open += e.count; else full += e.count; }
+  return { full, open };
+}
+function extText(d) {
+  const { full, open } = extCounts(d), u = extUnit(d), p = [];
+  if (full) p.push(`${qty(full)}${u}`);
+  if (open) p.push(`使いかけ${qty(open)}${u}`);
+  return p.join('、');
+}
+function unit(d) {
+  if (isExt(d)) return extUnit(d);
+  const s = (d.name || '') + (d.dose || '');
+  if (s.includes('カプセル')) return 'C';
+  if (/(テープ|パップ|貼付|枚)/.test(s)) return '枚';
+  if (/(散|顆粒|細粒|包)/.test(s)) return '包';
+  return '錠';
+}
+const entryTotal = e => (e.size || 1) * e.count;
+const total = d => d.entries.reduce((a, e) => a + entryTotal(e), 0);
+function breakdown(d) {
+  if (isExt(d)) return extText(d);
+  const parts = [];
+  const sizes = [...new Set(d.entries.filter(e => e.size).map(e => e.size))].sort((a, b) => b - a);
+  for (const s of sizes) {
+    const n = d.entries.filter(e => e.size === s).reduce((a, e) => a + e.count, 0);
+    if (n) parts.push(`${s}×${qty(n)}`);
+  }
+  const loose = d.entries.filter(e => !e.size).map(e => qty(e.count));
+  if (loose.length) parts.push(loose.join('+'));
+  return parts.join(' + ');
+}
+const entryLabel = (e, u) => e.ext ? `${e.ext === 'open' ? '使いかけ' : '未開封'} ${qty(e.count)}${u}` : e.size ?`${e.size}${u}シート × ${qty(e.count)}` : `バラ ${qty(e.count)}${u}`;
+
+function findDrug(id) {
+  for (const c of state.clinics) {
+    const d = c.drugs.find(x => x.id === id);
+    if (d) return { drug: d, clinic: c };
+  }
+  return null;
+}
+const allIds = () => state.clinics.flatMap(c => c.drugs.map(d => d.id));
+const newDrug = (name = '', dose = '', usage = '') => ({ id: uid(), name, dose, usage, sheetSize: 10, entries: [] });
+
+const TIMINGS = [['wake', '起床時'], ['morning', '朝'], ['noon', '昼'], ['evening', '夕'], ['bedtime', '眠前']];
+const packTotal = p => TIMINGS.reduce((a, [k]) => a + (p.counts[k] || 0), 0);
+const packSummary = p => TIMINGS.filter(([k]) => p.counts[k] > 0).map(([k, l]) => l + p.counts[k]).join(' ');
+
+function touch(id) {
+  ui.recent = [id, ...ui.recent.filter(x => x !== id)].slice(0, 8);
+}
+
+/* ================= 数量操作 ================= */
+function addHeat(id, size, count, ext) {
+  const r = findDrug(id);
+  if (!r || !count) return;
+  ui.note = '';
+  const e = { id: uid(), size: size || null, count, at: Date.now() };
+  if (ext) e.ext = ext;
+  r.drug.entries.push(e);
+  touch(id);
+  ui.undo.push({ drugId: id, entryId: e.id, msg: `${displayName(r.drug)}  ${entryLabel(e, unit(r.drug))}` });
+  if (ui.undo.length > 50) ui.undo.shift();
+  save();
+  refresh(id);
+}
+function removeEntry(id, eid) {
+  const r = findDrug(id); if (!r) return;
+  r.drug.entries = r.drug.entries.filter(e => e.id !== eid);
+  ui.undo = ui.undo.filter(u => u.entryId !== eid);
+  save(); refresh();
+}
+function removeLastSheet(id, size) {
+  const r = findDrug(id); if (!r) return;
+  const list = r.drug.entries.filter(e => e.size === size);
+  const e = list[list.length - 1];
+  if (!e) return;
+  if (e.count > 1) { e.count -= 1; save(); refresh(); }
+  else removeEntry(id, e.id);
+}
+function removeLastExt(id, kind) {
+  const r = findDrug(id); if (!r) return;
+  const list = r.drug.entries.filter(e => (e.ext || 'full') === kind && !e.size);
+  const e = list[list.length - 1];
+  if (!e) return;
+  if (e.count > 1) { e.count -= 1; save(); refresh(); }
+  else removeEntry(id, e.id);
+}
+function undoLast() {
+  const u = ui.undo.pop(); if (!u) return;
+  const r = findDrug(u.drugId);
+  if (r) r.drug.entries = r.drug.entries.filter(e => e.id !== u.entryId);
+  save(); refresh();
+}
+
+/* ================= 画像OCR（Tesseract・端末内で処理） =================
+   エンジンと日本語データはこのページと一緒に置いたファイルから読み込む（外部送信なし） */
+const OCR = { worker: null, loading: null, queue: Promise.resolve(), pending: 0, status: '', progress: 0, pages: 0 };
+const assetURL = f => new URL(f, location.href).href;
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error('load ' + src));
+    document.head.appendChild(s);
+  });
+}
+function ocrStatus(text, progress) {
+  OCR.status = text;
+  if (progress != null) OCR.progress = progress;
+  const box = $('#ocrStatus'), msg = $('#ocrMsg'), bar = $('#ocrBar');
+  if (box) box.hidden = !text;
+  if (msg) msg.textContent = text;
+  if (bar) bar.style.width = Math.round(OCR.progress * 100) + '%';
+  const cm = $('#camMsg');
+  if (cm && !$('#cam').hidden) cm.textContent = OCR.pending ? `読み取り中…（残り${OCR.pending}枚）撮影は続けられます` : '1ページずつ枠に合わせて撮影';
+}
+const STEP = {
+  'loading tesseract core': '準備中（OCRエンジン）', 'initializing tesseract': '準備中',
+  'loading language traineddata': '準備中（日本語データ）', 'initializing api': '準備中',
+  'recognizing text': '文字を読み取り中'
+};
+async function getWorker() {
+  if (OCR.worker) return OCR.worker;
+  if (!OCR.loading) OCR.loading = (async () => {
+    if (!window.Tesseract) {
+      try { await loadScript('tesseract.min.js'); }
+      catch (e) { await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'); }
+    }
+    const w = await Tesseract.createWorker('jpn', 1, {
+      workerPath: assetURL('worker.min.js'),
+      workerBlobURL: false,
+      corePath: assetURL('tesseract-core-lstm.wasm.js'),
+      langPath: assetURL('./').replace(/\/$/, ''),
+      logger: m => {
+        if (!m || !m.status) return;
+        const label = STEP[m.status] || '処理中';
+        ocrStatus(`${label}… ${Math.round((m.progress || 0) * 100)}%${OCR.pending > 1 ? `（残り${OCR.pending}枚）` : ''}`, m.progress || 0);
+      }
+    });
+    await w.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' });
+    OCR.worker = w;
+    return w;
+  })().catch(err => { OCR.loading = null; throw err; });
+  return OCR.loading;
+}
+
+// 前処理：長辺2400pxに縮小し、グレースケール＋明るさの幅を広げる
+async function prepareImage(src) {
+  let bmp;
+  if (src instanceof HTMLCanvasElement) bmp = src;
+  else {
+    try { bmp = await createImageBitmap(src, { imageOrientation: 'from-image' }); }
+    catch (e) {
+      bmp = await new Promise((res, rej) => {
+        const img = new Image(); img.onload = () => res(img); img.onerror = rej;
+        img.src = URL.createObjectURL(src);
+      });
+    }
+  }
+  const W = bmp.width || bmp.naturalWidth, H = bmp.height || bmp.naturalHeight;
+  const scale = Math.min(1, 2400 / Math.max(W, H));
+  const c = document.createElement('canvas');
+  c.width = Math.round(W * scale); c.height = Math.round(H * scale);
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  const im = g.getImageData(0, 0, c.width, c.height), d = im.data;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4) {
+    const y = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0;
+    d[i] = y; hist[y]++;
+  }
+  const total = d.length / 4;
+  let lo = 0, hi = 255, acc = 0;
+  for (; lo < 255; lo++) { acc += hist[lo]; if (acc > total * 0.01) break; }
+  acc = 0;
+  for (; hi > 0; hi--) { acc += hist[hi]; if (acc > total * 0.01) break; }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0; i < d.length; i += 4) {
+    const v = Math.max(0, Math.min(255, (d[i] - lo) * 255 / span));
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  g.putImageData(im, 0, 0);
+  return c;
+}
+
+// Tesseractの日本語出力は文字間に空白が入るので詰める
+function cleanOcrText(t) {
+  return t.split('\n')
+    .map(l => l.replace(/(?<=[^\x00-\x7F]) +(?=[^\x00-\x7F])/g, '')
+               .replace(/(?<=[^\x00-\x7F]) +(?=[0-9.]+\s*(mg|μg|g|mL|%|錠|カプセル|包|枚|本|日分|回分|回))/g, '')
+               .replace(/(?<=\d) +(?=(mg|μg|g|mL|%|錠|カプセル|包|枚|本|日分|回分|回))/g, '')
+               .replace(/ {2,}/g, '  ').trim())
+    .filter(l => l && /[0-9A-Za-z぀-ヿ一-鿿]/.test(l))
+    .join('\n');
+}
+
+function appendScanText(text) {
+  if (!text) return;
+  ui.scanText = (ui.scanText.trim() ? ui.scanText.replace(/\s*$/, '') + '\n' : '') + text;
+  save();
+  const ta = $('#scanText');
+  if (ta) { ta.value = ui.scanText; ta.scrollTop = ta.scrollHeight; }
+}
+
+function ocrImage(src) {
+  OCR.pending++;
+  ocrStatus(`読み取り待ち（${OCR.pending}枚）`, 0);
+  OCR.queue = OCR.queue.then(async () => {
+    try {
+      const canvas = await prepareImage(src);
+      const w = await getWorker();
+      const { data } = await w.recognize(canvas);
+      const text = cleanOcrText(data.text || '');
+      OCR.pages++;
+      appendScanText(text);
+      OCR.pending--;
+      ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `${OCR.pages}ページ読み取りました。内容を確認して「解析する」を押してください。`, 1);
+    } catch (err) {
+      OCR.pending--;
+      console.error(err);
+      ocrStatus('読み取れませんでした。通信できる状態でページを開き直してから、もう一度お試しください。（' + (err?.message || err) + '）', 0);
+    }
+  });
+  return OCR.queue;
+}
+
+/* ---- 無音カメラ（ページがカメラを使える環境のみ） ---- */
+const Cam = { stream: null, torch: false, shots: 0 };
+async function camOpen() {
+  const note = $('#camNote');
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
+    Cam.stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }
+    });
+  } catch (e) {
+    ui.camBlocked = true;
+    if (note) note.hidden = false;
+    return;
+  }
+  const v = $('#camVideo');
+  v.srcObject = Cam.stream;
+  try { await v.play(); } catch (e) {}
+  Cam.shots = 0; $('#camCount').textContent = '撮影 0枚';
+  $('#cam').hidden = false;
+  ocrStatus(OCR.status);
+  getWorker().catch(() => {});   // 撮影中にエンジンを準備しておく
+}
+function camClose() {
+  if (Cam.stream) Cam.stream.getTracks().forEach(t => t.stop());
+  Cam.stream = null; Cam.torch = false;
+  $('#cam').hidden = true;
+}
+function camShot() {
+  const v = $('#camVideo');
+  if (!v.videoWidth) return;
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  const f = $('#camFlash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
+  try { navigator.vibrate?.(30); } catch (e) {}
+  Cam.shots++; $('#camCount').textContent = `撮影 ${Cam.shots}枚`;
+  ocrImage(c);
+  ocrStatus(OCR.status);
+}
+async function camTorch() {
+  const track = Cam.stream?.getVideoTracks()[0];
+  if (!track) return;
+  try { await track.applyConstraints({ advanced: [{ torch: !Cam.torch }] }); Cam.torch = !Cam.torch; }
+  catch (e) { $('#camTorchBtn').textContent = 'ライト非対応'; }
+}
+
+/* ================= 解析（お薬手帳テキスト → 構造化） ================= */
+const CLINIC = /(病院|医院|クリニック|診療所|医療センター|内科|外科|眼科|皮膚科|耳鼻|歯科|整形|小児科|泌尿器|婦人科|心療|精神科)/;
+const PHARM = /(薬局|調剤|ファーマシー|ドラッグ)/;
+const NOISE = /(TEL|Tel|電話|FAX|〒|住所|薬剤師|お薬手帳|調剤日|処方日|交付日|患者|生年月日|保険|負担|領収|点数|注意|お大事|様$)/;
+const FORM = /(錠|カプセル|散|顆粒|細粒|シロップ|DS|液|テープ|パップ|軟膏|クリーム|ローション|ゲル|点眼|点鼻|吸入|エアゾール|坐剤|坐薬|貼付剤|注|OD|mg|μg|mL)/;
+const USAGE_SRC = '(1日\\s*\\d+\\s*回|1回|分\\s*\\d|毎食|朝食|昼食|夕食|食前|食後|食間|就寝前|寝る前|眠前|起床時|頓用|頓服|\\d+\\s*日分|\\d+\\s*回分|時間毎|時間おき|疼痛時|発熱時|不眠時|便秘時|必要時|適宜|塗布|患部|貼付)';
+const UNIT_SRC = '(錠|カプセル|C|包|g|mL|ml|枚|本|個|滴|袋|T|瓶|キット|噴霧|吸入)';
+const DOSE_CORE = '((1日|1回)\\s*)?\\d+(\\.\\d+)?\\s*' + UNIT_SRC;
+const USAGE = new RegExp(USAGE_SRC);
+const DOSE_END = new RegExp(DOSE_CORE + '\\s*$');
+const DOSE_ONLY = new RegExp('^' + DOSE_CORE + '\\s*$');
+const PER_DOSE = new RegExp('1回\\s*\\d+(\\.\\d+)?\\s*' + UNIT_SRC);
+
+const OCR_FIXES = [];
+try {
+  for (const [w, r] of [['一', 'ー'], ['口', 'ロ'], ['力', 'カ'], ['工', 'エ'], ['卜', 'ト'], ['夕', 'タ']]) {
+    OCR_FIXES.push([new RegExp(`(?<=[ァ-ヴー])${w}|${w}(?=[ァ-ヴー])`, 'g'), r]);
+  }
+} catch (e) { /* 古いiOSでは補正なし */ }
+
+function normalize(s) {
+  let t = s.replace(/[！-～]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+           .replace(/　/g, ' ').replace(/µ/g, 'μ');
+  for (const [re, r] of OCR_FIXES) t = t.replace(re, r);
+  return t.replace(/[ \t]{3,}/g, '  ').trim();
+}
+function isDrugLine(s) {
+  if (!FORM.test(s)) return false;
+  const m = s.match(USAGE);
+  const head = m ? s.slice(0, m.index) : s;
+  const stripped = head.replace(/(カプセル|シロップ|ドライシロップ|テープ|パップ|クリーム|ローション|ゲル|エアゾール)/g, '');
+  return /[ァ-ヴー]{3,}/.test(stripped)
+    || /\d+(\.\d+)?\s*(mg|μg|%|mL|単位)/.test(head)
+    || /(【般】|\[般\]|\(般\))/.test(head)
+    || /[A-Za-z]{2,}.*(錠|カプセル|散|顆粒)/.test(head);
+}
+function clinicName(s) {
+  if (!CLINIC.test(s) || PHARM.test(s) || /(診療科|科名|紹介)/.test(s) || isDrugLine(s)) return null;
+  let t = s.replace(/(処方)?(医療機関名?|病院名|医院名|処方元)\s*[:：]?/g, ' ');
+  t = t.replace(/(令和|平成|R|H)?\s*\d{1,4}\s*[年\/.\-]\s*\d{1,2}\s*[月\/.\-]\s*\d{1,2}\s*日?/g, ' ');
+  const tk = t.split(/\s+/).filter(Boolean);
+  const f = tk.findIndex(x => CLINIC.test(x));
+  let l = -1; tk.forEach((x, i) => { if (CLINIC.test(x)) l = i; });
+  if (f < 0) return null;
+  const name = tk.slice(f, l + 1).join('');
+  return name.length >= 2 ? name : null;
+}
+function cleanName(s) {
+  return s.replace(/^\s*(Rp\.?\s*\d+|\d+\s*[).、．:]|[①-⑳]|[・•*])\s*/, '')
+          .replace(/【(内服|外用|頓服|内用|屯用)[^】]*】/g, '').trim();
+}
+function splitDrugLine(line) {
+  let head = line, usage = '';
+  const m = line.match(USAGE);
+  if (m) { head = line.slice(0, m.index); usage = line.slice(m.index).trim(); }
+  head = head.trim();
+  let dose = '';
+  const d = head.match(DOSE_END);
+  if (d) { dose = d[0].trim(); head = head.slice(0, d.index).trim(); }
+  if (!dose) { const p = usage.match(PER_DOSE); if (p) dose = p[0].trim(); }
+  return { name: cleanName(head), dose, usage };
+}
+function parse(text) {
+  const clinics = [];
+  let current = -1, waiting = [], lastGroup = [], lastDrug = null, prevUsage = false;
+  const ci = () => {
+    if (current < 0) { clinics.push({ id: uid(), name: '医療機関不明', drugs: [] }); current = clinics.length - 1; }
+    return current;
+  };
+  for (const raw of text.split(/\r?\n/)) {
+    const line = normalize(raw);
+    if (line.length < 2) continue;
+
+    const cn = clinicName(line);
+    if (cn) {
+      const i = clinics.findIndex(c => c.name === cn);
+      if (i >= 0) current = i; else { clinics.push({ id: uid(), name: cn, drugs: [] }); current = clinics.length - 1; }
+      waiting = []; lastDrug = null; prevUsage = false;
+      continue;
+    }
+    if (NOISE.test(line) || PHARM.test(line)) { prevUsage = false; continue; }
+
+    if (isDrugLine(line)) {
+      const p = splitDrugLine(line);
+      if (!p.name) continue;
+      const c = ci();
+      clinics[c].drugs.push(newDrug(p.name, p.dose, p.usage));
+      const ref = [c, clinics[c].drugs.length - 1];
+      lastDrug = ref;
+      if (p.usage) { waiting = []; lastGroup = [ref]; prevUsage = true; }
+      else { waiting.push(ref); prevUsage = false; }
+      continue;
+    }
+
+    if (USAGE.test(line)) {
+      let targets;
+      if (prevUsage) targets = lastGroup;
+      else if (waiting.length) targets = waiting;
+      else if (lastDrug) targets = [lastDrug];
+      else continue;
+      const pd = line.match(PER_DOSE);
+      for (const [c, d] of targets) {
+        const dr = clinics[c].drugs[d];
+        dr.usage = dr.usage ? dr.usage + ' ' + line : line;
+        if (!dr.dose && pd) dr.dose = pd[0].trim();
+      }
+      lastGroup = targets; waiting = []; prevUsage = true;
+      continue;
+    }
+
+    if (lastDrug && DOSE_ONLY.test(line)) {
+      const dr = clinics[lastDrug[0]].drugs[lastDrug[1]];
+      if (!dr.dose) { dr.dose = line; continue; }
+    }
+    prevUsage = false;
+  }
+  return clinics.filter(c => c.drugs.length);
+}
+
+function merge(incoming) {
+  let added = 0, skipped = 0;
+  const key = s => (s || '').replace(/\s/g, '');
+  for (const c of incoming) {
+    const name = (c.name || '').trim() || '医療機関不明';
+    let target = state.clinics.find(x => x.name === name);
+    if (!target) { target = { id: uid(), name, drugs: [] }; state.clinics.push(target); }
+    for (const d of c.drugs) {
+      if (!(d.name || '').trim()) continue;
+      if (target.drugs.some(x => key(x.name) === key(d.name))) { skipped++; continue; }
+      target.drugs.push({ ...d, name: d.name.trim(), dose: d.dose.trim(), usage: d.usage.trim() });
+      added++;
+    }
+  }
+  state.clinics = state.clinics.filter(c => c.drugs.length);
+  save();
+  return { added, skipped };
+}
+
+function deleteDrug(id) {
+  for (const c of state.clinics) c.drugs = c.drugs.filter(d => d.id !== id);
+  state.clinics = state.clinics.filter(c => c.drugs.length);
+  for (const p of state.packs) p.drugIds = p.drugIds.filter(x => x !== id);
+  state.packs = state.packs.filter(p => p.drugIds.length);
+  ui.recent = ui.recent.filter(x => x !== id);
+  ui.undo = ui.undo.filter(u => u.drugId !== id);
+  save();
+}
+
+/* ================= 医薬品マスター（端末内のみ） =================
+   items: { n: 販売名, y: YJコード, g: [GTIN-14...], h: [HOTコード...] }
+   照合: 2文字組(bigram)で候補を絞り、レーベンシュタイン距離で類似度を出す */
+const Master = { items: [], norm: [], bigram: new Map(), gs1: new Map(), gs1Core: new Map(), byHot: new Map(), meta: null, ready: false };
+const YJ_RE = /^\d{7}[A-Z]\d{3}[0-9A-Z]$/;
+
+function normName(s) {
+  return toKata((s || '').normalize('NFKC'))
+    .replace(/【般】|\[般\]|\(般\)/g, '')
+    .replace(/[\s・「」『』"'“”]/g, '')
+    .toUpperCase();
+}
+function buildIndex() {
+  Master.norm = Master.items.map(it => normName(it.n));
+  const idx = new Map();
+  Master.norm.forEach((s, i) => {
+    const seen = new Set();
+    for (let k = 0; k < s.length - 1; k++) {
+      const b = s.substr(k, 2);
+      if (seen.has(b)) continue;
+      seen.add(b);
+      let a = idx.get(b); if (!a) { a = []; idx.set(b, a); }
+      a.push(i);
+    }
+  });
+  Master.bigram = idx;
+  Master.gs1 = new Map(); Master.gs1Core = new Map(); Master.byHot = new Map();
+  Master.items.forEach((it, i) => {
+    for (const g of it.g || []) { Master.gs1.set(g, i); Master.gs1Core.set(g.slice(1, 13), i); }
+    for (const h of it.h || []) { Master.byHot.set(h, i); if (h.length >= 9) Master.byHot.set(h.slice(0, 9), i); }
+  });
+  Master.ready = Master.items.length > 0;
+}
+function lev(a, b) {
+  if (a === b) return 0;
+  const m = a.length, n = b.length;
+  if (!m) return n; if (!n) return m;
+  let prev = new Uint16Array(n + 1), cur = new Uint16Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    const ca = a.charCodeAt(i - 1);
+    for (let j = 1; j <= n; j++) {
+      const c = ca === b.charCodeAt(j - 1) ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + c);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[n];
+}
+// 音声入力の言い回しを薬品名の表記に寄せる（検索語だけに使う）
+function normSpoken(q) {
+  const kanjiNum = { '〇': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
+  let s = normName(q)
+    .replace(/([一二三四五六七八九])?十([一二三四五六七八九])?/g, (m, a, b) => String((a ? kanjiNum[a] : 1) * 10 + (b ? kanjiNum[b] : 0)))
+    .replace(/[〇一二三四五六七八九](?=[0-9]*(MG|G|ジョウ|錠|ミリ|%|パーセント|マイクロ))/g, c => kanjiNum[c]);
+  const rules = [
+    [/ミリグラム|ミリ/g, 'MG'], [/マイクログラム|マイクロ/g, 'ΜG'], [/グラム/g, 'G'], [/パーセント/g, '%'],
+    [/ジョウ/g, '錠'], [/オーディー|オーデー/g, 'OD'],[/テン(?=\d)/g, '.'],
+    [/サンカマグネシウム/g, '酸化マグネシウム'], [/エンサンエン/g, '塩酸塩']
+  ];
+  for (const [re, r] of rules) s = s.replace(re, r);
+  return s;
+}
+function searchMaster(q, k = 6, loose = false) {
+  const s = loose ? normSpoken(q) : normName(q);
+  if (!Master.ready || s.length < 2) return [];
+  const score = new Uint16Array(Master.items.length), touched = [], seen = new Set();
+  for (let i = 0; i < s.length - 1; i++) {
+    const b = s.substr(i, 2);
+    if (seen.has(b)) continue;
+    seen.add(b);
+    const a = Master.bigram.get(b); if (!a) continue;
+    for (const id of a) { if (!score[id]) touched.push(id); score[id]++; }
+  }
+  touched.sort((x, y) => score[y] - score[x]);
+  const nb = seen.size || 1;
+  const nums = s.match(/\d+(\.\d+)?/g) || [];
+  const res = touched.slice(0, 400).map(id => {
+    const t = Master.norm[id];
+    let sim = 1 - lev(s, t) / Math.max(s.length, t.length);
+    if (t.startsWith(s)) sim = Math.max(sim, 0.8 + 0.2 * s.length / t.length);
+    // 音声・手入力の検索では、会社名などが抜けた短い言い方も拾えるよう、語の含まれ具合も見る
+    if (loose) sim = Math.max(sim, 0.9 * (score[id] / nb) - 0.1 * Math.max(0, t.length - s.length) / t.length);
+    // 規格の数字（5 と 2.5 など）は完全一致を重視
+    for (const num of nums) if (!new RegExp(`(^|[^\\d.])${num.replace('.', '\\.')}(?![\\d.])`).test(t)) sim -= 0.15;
+    return { id, sim };
+  }).sort((a, b) => b.sim - a.sim);
+  const out = [], names = new Set();
+  for (const r of res) {
+    const it = Master.items[r.id];
+    const key = it.n + '|' + (it.y || '');
+    if (names.has(key)) continue;
+    names.add(key);
+    out.push({ n: it.n, y: it.y || '', sim: r.sim });
+    if (out.length >= k) break;
+  }
+  return out;
+}
+function applyMaster(d, it, sim, gtin) {
+  if (!d.rawName) d.rawName = d.name;
+  d.name = it.n;
+  d.yj = it.y || '';
+  d.matchSim = sim;
+  if (gtin) d.gs1 = gtin;
+}
+// 自動適用は「十分に似ていて、2位と差がある」ときだけ
+function autoMatch(d) {
+  if (!Master.ready || d.yj || !(d.name || '').trim()) return;
+  const c = searchMaster(d.name, 2);
+  if (c[0] && c[0].sim >= 0.92 && (!c[1] || c[0].sim - c[1].sim >= 0.03)) applyMaster(d, c[0], c[0].sim);
+}
+const matched = d => !!d.yj || d.matchSim === 1;
+
+// GS1: (01)GTIN-14 を取り出す。リーダーの区切り文字(GS)や番号の手入力にも対応
+function parseGS1(raw) {
+  const s = (raw || '').normalize('NFKC').replace(/\x1d/g, '|');
+  let m = s.match(/\(01\)\s*(\d{14})/);
+  if (m) return m[1];
+  const digits = s.replace(/[^\d|]/g, '');
+  m = digits.match(/^\|?01(\d{14})/);
+  if (m) return m[1];
+  const d = digits.replace(/\|/g, '');
+  if (/^\d{14}$/.test(d)) return d;
+  if (/^\d{13}$/.test(d)) return '0' + d;
+  return null;
+}
+function lookupGS1(g) {
+  if (!g) return null;
+  let i = Master.gs1.get(g);
+  if (i == null) i = Master.gs1Core.get(g.slice(1, 13));
+  return i == null ? null : Master.items[i];
+}
+
+/* ---- 保存（IndexedDB。使えなければこのページを開いている間だけ保持） ---- */
+function idb() {
+  return new Promise((res, rej) => {
+    try {
+      const r = indexedDB.open('jishiyaku', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    } catch (e) { rej(e); }
+  });
+}
+async function idbSet(key, val) {
+  try {
+    const db = await idb();
+    await new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(val, key); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+    return true;
+  } catch (e) { return false; }
+}
+async function idbGet(key) {
+  try {
+    const db = await idb();
+    return await new Promise((res, rej) => { const r = db.transaction('kv').objectStore('kv').get(key); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  } catch (e) { return undefined; }
+}
+
+/* ---- 取り込み ---- */
+async function readText(file) {
+  const buf = await file.arrayBuffer();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch (e) { return new TextDecoder('shift_jis').decode(buf); }
+}
+function parseCSV(text, delim) {
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += c;
+    } else if (c === '"') q = true;
+    else if (c === delim) { row.push(cell); cell = ''; }
+    else if (c === '\n') { row.push(cell.replace(/\r$/, '')); rows.push(row); row = []; cell = ''; }
+    else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+async function loadXLSX() {
+  if (window.XLSX) return;
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = res;
+    s.onerror = () => rej(new Error('Excelを読むための部品を取得できませんでした。通信できる状態で再度お試しください。'));
+    document.head.appendChild(s);
+  });
+}
+async function fileTables(file) {
+  if (/\.zip$/i.test(file.name)) throw new Error(`${file.name}：ZIPのままでは読めません。「ファイル」アプリでタップして展開してから選んでください。`);
+  if (/\.xlsx?$/i.test(file.name)) {
+    await loadXLSX();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    return wb.SheetNames.map(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' }));
+  }
+  const text = await readText(file);
+  const head = text.slice(0, 4000);
+  const delim = (head.split('\t').length > head.split(',').length) ? '\t' : ',';
+  return [parseCSV(text, delim)];
+}
+const isGTIN = v => /^(45|49)\d{11}$/.test(v) || /^\d(45|49)\d{11}$/.test(v);
+const isHOT = v => /^\d{9}$|^\d{13}$/.test(v) && !isGTIN(v);
+const cellStr = v => String(v ?? '').normalize('NFKC').trim();
+
+function detectColumns(rows) {
+  // 見出し行があれば見出しで判定
+  for (let r = 0; r < Math.min(rows.length, 15); r++) {
+    const row = rows[r].map(cellStr);
+    const find = (re, not) => row.findIndex(c => c.length < 40 && re.test(c) && !(not && not.test(c)));
+    const name = [find(/販売名/, /カナ|コード/), find(/医薬品名|製品名|品名|薬品名|商品名/, /カナ|コード/), find(/告示名称/)].find(i => i >= 0);
+    const yj = find(/YJ|個別医薬品コード/);
+    const yaka = find(/薬価基準収載医薬品コード|薬価コード|薬価基準コード/);
+    const gs1 = row.map((c, i) => (c.length < 40 && /GS1|調剤包装単位コード|販売包装単位コード|元梱包装単位コード|JAN|GTIN/.test(c)) ? i : -1).filter(i => i >= 0);
+    const hot = find(/基準番号|HOT/);
+    if ((name >= 0 && (yj >= 0 || yaka >= 0 || gs1.length)) || (hot >= 0 && gs1.length)) {
+      return { start: r + 1, name: name ?? -1, yj: yj >= 0 ? yj : yaka, gs1, hot };
+    }
+  }
+  // 見出しなし（MEDISのテキスト等）は中身の形で判定
+  const sample = rows.slice(0, 400).map(r => r.map(cellStr));
+  const width = Math.max(0, ...sample.map(r => r.length));
+  const ratio = (i, test) => { let n = 0, t = 0; for (const r of sample) { if (r[i]) { t++; if (test(r[i])) n++; } } return t ? n / sample.length : 0; };
+  let yj = -1, name = -1, best = 0, hot = -1; const gs1 = [];
+  for (let i = 0; i < width; i++) {
+    if (yj < 0 && ratio(i, v => YJ_RE.test(v)) > 0.5) yj = i;
+    if (ratio(i, isGTIN) > 0.5) gs1.push(i);
+    if (hot < 0 && ratio(i, v => /^\d{13}$/.test(v) && !isGTIN(v)) > 0.5) hot = i;
+    const ns = ratio(i, v => /[ァ-ヴ]{2,}/.test(v) && /(錠|カプセル|散|顆粒|液|軟膏|クリーム|テープ|注|mg|%|g)/.test(v));
+    if (ns > best + 0.05) { best = ns; name = i; }
+  }
+  if (best < 0.3) name = -1;
+  return { start: 0, name, yj, gs1, hot };
+}
+
+async function importMasterFiles(files, onMsg) {
+  const keyOf = (n, y) => (y || 'N') + '|' + normName(n);
+  const keyIndex = new Map(Master.items.map((it, i) => [keyOf(it.n, it.y), i]));
+  const hotIndex = new Map();
+  Master.items.forEach((it, i) => (it.h || []).forEach(h => { hotIndex.set(h, i); hotIndex.set(h.slice(0, 9), i); }));
+  const pending = [];
+  let rowsDone = 0;
+  const addUnique = (arr, v) => { if (v && !arr.includes(v)) arr.push(v); };
+
+  for (const file of files) {
+    onMsg(`${file.name} を読み込み中…`);
+    const tables = await fileTables(file);
+    for (const rows of tables) {
+      const col = detectColumns(rows);
+      if (col.name < 0 && !(col.hot >= 0 && col.gs1.length)) continue;
+      for (let r = col.start; r < rows.length; r++) {
+        const row = rows[r].map(cellStr);
+        const name = col.name >= 0 ? row[col.name] : '';
+        let yj = col.yj >= 0 ? row[col.yj] : '';
+        if (!YJ_RE.test(yj)) yj = '';
+        const gs = col.gs1.map(i => row[i]).filter(v => /^\d{13,14}$/.test(v)).map(v => v.padStart(14, '0'));
+        const hot = col.hot >= 0 && isHOT(row[col.hot]) ? row[col.hot] : '';
+        if (name && /[ァ-ヴA-Za-z一-龥]/.test(name)) {
+          const k = keyOf(name, yj);
+          let i = keyIndex.get(k);
+          if (i == null) { i = Master.items.length; Master.items.push({ n: name, y: yj, g: [], h: [] }); keyIndex.set(k, i); }
+          const it = Master.items[i];
+          gs.forEach(g => addUnique(it.g, g));
+          if (hot) { addUnique(it.h, hot); hotIndex.set(hot, i); hotIndex.set(hot.slice(0, 9), i); }
+        } else if (hot && gs.length) {
+          pending.push([hot, gs]);
+        }
+        rowsDone++;
+      }
+    }
+  }
+  // GS1対応表（名前なし）はHOTコードで結びつける
+  let linked = 0;
+  for (const [hot, gs] of pending) {
+    const i = hotIndex.get(hot) ?? hotIndex.get(hot.slice(0, 9));
+    if (i == null) continue;
+    gs.forEach(g => addUnique(Master.items[i].g, g));
+    linked++;
+  }
+  for (const it of Master.items) { if (!it.g.length) delete it.g; if (!it.h.length) delete it.h; }
+  Master.meta = { date: new Date().toLocaleDateString('ja-JP'), files: [...(Master.meta?.files || []), ...[...files].map(f => f.name)] };
+  buildIndex();
+  const stored = await idbSet('master', { items: Master.items, meta: Master.meta });
+  return { rowsDone, linked, unlinked: pending.length - linked, stored };
+}
+function rematchAll() {
+  let n = 0;
+  for (const c of state.clinics) for (const d of c.drugs) { const had = d.yj; autoMatch(d); if (!had && d.yj) n++; }
+  save();
+  return n;
+}
+
+const SAMPLE = `調剤日 令和8年10月1日
+みどり調剤薬局 TEL 046-000-0000
+さくら内科クリニック
+アムロジピン錠5mg「トーワ」 1錠
+カンデサルタン錠8mg「サワイ」 1錠
+1日1回 朝食後 28日分
+メトホルミン塩酸塩錠250mgMT「DSEP」 2錠
+1日2回 朝夕食後 28日分
+あおば整形外科
+ロキソプロフェンNa錠60mg「サワイ」 3錠
+レバミピド錠100mg「オーツカ」 3錠
+1日3回 毎食後 14日分
+ロキソニンテープ100mg 14枚
+1日1回 患部に貼付`;
+
+/* ================= 鑑別レポート ================= */
+// 用法を「分N 朝食後」の形に整え、並び順のキーを作る
+function usageInfo(raw) {
+  const s = normalize(raw || '');
+  const m = s.match(/1日\s*(\d+)\s*回/) || s.match(/分\s*(\d+)/);
+  const n = m ? +m[1] : null;
+  const timing = s
+    .replace(/1日\s*\d+\s*回/g, '').replace(/分\s*\d+/g, '')
+    .replace(/\d+\s*日分/g, '').replace(/\d+\s*回分/g, '')
+    .replace(new RegExp('1回\\s*\\d+(\\.\\d+)?\\s*' + UNIT_SRC, 'g'), '')
+    .replace(/[、,]/g, ' ').replace(/\s+/g, ' ').trim();
+  const prn = /(頓用|頓服|必要時|疼痛時|発熱時|不眠時|便秘時|時$)/.test(s);
+  const label = n ? `分${n}${timing ? ' ' + timing : ''}` : (timing || '用法未記載');
+  const meal = /(食前|食直前)/.test(timing) ? 0 : /食間/.test(timing) ? 1 : /(食後|食直後)/.test(timing) ? 2 : 3;
+  const dayWords = [/起床/, /朝/, /昼/, /夕/, /(就寝|寝る前|眠前)/];
+  let day = dayWords.findIndex(re => re.test(timing)); if (day < 0) day = 5;
+  return { label, key: [prn ? 2 : (n ? 0 : 1), n || 0, meal, day] };
+}
+function cmpKey(a, b) {
+  for (let i = 0; i < a.key.length; i++) if (a.key[i] !== b.key[i]) return a.key[i] - b.key[i];
+  return a.label.localeCompare(b.label, 'ja');
+}
+// ①〜㊿（51以降は (51)）
+function circled(n) {
+  if (n >= 1 && n <= 20) return String.fromCharCode(0x245F + n);
+  if (n >= 21 && n <= 35) return String.fromCharCode(0x3250 + n - 20);
+  if (n >= 36 && n <= 50) return String.fromCharCode(0x32B0 + n - 35);
+  return `(${n})`;
+}
+// [1,2,4,5,6] → ①②④〜⑥（3つ以上の連番は「〜」でまとめる）
+function numberRange(nums) {
+  const s = [...new Set(nums)].sort((a, b) => a - b);
+  let out = '';
+  for (let i = 0; i < s.length;) {
+    let j = i;
+    while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
+    if (j - i >= 2) out += circled(s[i]) + '〜' + circled(s[j]);
+    else for (let k = i; k <= j; k++) out += circled(s[k]);
+    i = j + 1;
+  }
+  return out;
+}
+function remainText(d) {
+  if (isExt(d)) { const s = extText(d); return s ? `（${s}）` : '（持参なし）'; }
+  const t = total(d);
+  if (t) return `（残薬：${qty(t)}${unit(d)}）`;
+  if (state.packs.some(p => p.drugIds.includes(d.id))) return '';
+  return '（持参なし）';
+}
+function buildReport() {
+  const out = ['【持参薬】'];
+  const numberOf = new Map();
+  let n = 0;
+  for (const c of state.clinics) {
+    out.push('●' + c.name);
+    const groups = new Map();
+    for (const d of c.drugs) {
+      const u = usageInfo(d.usage);
+      // 外用は頓用（内服）よりさらに下。外用どうしは分の少ない順
+      const ext = isExt(d);
+      if (ext) u.key = [3, ...u.key];
+      else u.key = [u.key[0], ...u.key];
+      const gk = (ext ? 'E|' : 'I|') + u.label;
+      if (!groups.has(gk)) groups.set(gk, { ...u, drugs: [] });
+      groups.get(gk).drugs.push(d);
+    }
+    for (const g of [...groups.values()].sort(cmpKey)) {
+      for (const d of g.drugs) {
+        n++; numberOf.set(d.id, n);
+        out.push(`${circled(n)}${displayName(d)}${d.dose ? ' ' + d.dose : ''}${remainText(d)}`);
+      }
+      out.push('・・・・・' + g.label);
+      out.push('');
+    }
+  }
+  const comments = state.packs
+    .map(p => {
+      const nums = p.drugIds.map(id => numberOf.get(id)).filter(Boolean);
+      if (!nums.length) return null;
+      const counts = TIMINGS.filter(([k]) => p.counts[k] > 0).map(([k, l]) => `${l}${p.counts[k]}包`).join('、');
+      return `※${numberRange(nums)}一包化（${counts || '包数未入力'}）`;
+    })
+    .filter(Boolean);
+  if (comments.length) out.push(...comments);
+  while (out.length && out[out.length - 1] === '') out.pop();
+  return out.join('\n');
+}
+
+/* ================= 一覧の描画 ================= */
+const toKata = s => s.replace(/[ぁ-ゖ]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60));
+function matches(d) {
+  const q = ui.search.trim();
+  if (!q) return true;
+  const n = (d.name || '').toLowerCase();
+  return n.includes(q.toLowerCase()) || n.includes(toKata(q).toLowerCase());
+}
+
+function rowHtml(d) {
+  const t = total(d), sel = ui.selected.includes(d.id);
+  const info = [d.dose, d.usage].filter(Boolean).join(' / ');
+  const packs = state.packs.filter(p => p.drugIds.includes(d.id));
+  return `<div class="row${sel ? ' sel' : ''}" data-act="${ui.packMode ? 'select' : 'open'}" data-id="${d.id}" role="button" tabindex="0">
+    ${ui.packMode ? `<span class="check" aria-hidden="true">${sel ? '✓' : ''}</span>` : ''}
+    <div class="info">
+      <div class="dname">${esc(displayName(d))}</div>
+      ${info ? `<div class="sub">${esc(info)}</div>` : ''}
+      ${(packs.length || (Master.ready && !matched(d))) ? `<div class="tags">${Master.ready && !matched(d) ? '<span class="tag warn">マスター未照合</span>' : ''}${packs.map(p => `<span class="tag">${esc(p.name)} ${esc(packSummary(p) || '包数未入力')}</span>`).join('')}</div>` : ''}
+    </div>
+    <div class="qty" data-qty="${d.id}">${!t ? '<div class="none">—</div>'
+      : isExt(d) ? `<div class="num" style="font-size:15px">${esc(extText(d))}</div><div class="bd">外用</div>`
+      : `<div class="num">${qty(t)}<span class="u">${unit(d)}</span></div><div class="bd">${esc(breakdown(d))}</div>`}</div>
+    ${ui.packMode ? '' : isExt(d)
+      ? `<button class="quick" data-act="quick" data-id="${d.id}" aria-label="未開封を1${unit(d)}追加">+1${unit(d)}</button>`
+      : `<button class="quick" data-act="quick" data-id="${d.id}" aria-label="1シート追加">+${d.sheetSize}</button>`}
+  </div>`;
+}
+
+function recentHtml(exclude, act) {
+  const ids = ui.recent.filter(id => id !== exclude && findDrug(id));
+  if (!ids.length) return '';
+  return `<div class="recent"><span class="lbl">最近</span>${ids.map(id => {
+    const d = findDrug(id).drug;
+    return `<button class="chip" data-act="${act}" data-id="${id}"><b>${esc(displayName(d))}</b><span>${qty(total(d))}${unit(d)}</span></button>`;
+  }).join('')}</div>`;
+}
+
+function renderMain() {
+  const hasDrugs = state.clinics.length > 0;
+  $('#topTitle').textContent = ui.packMode ? '一包化の品目を選択' : (ui.label.trim() || '持参薬鑑別');
+  $('#packBtn').textContent = ui.packMode ? 'キャンセル' : '一包化';
+  $('#packBtn').disabled = !hasDrugs;
+  $('#scanBtn').disabled = ui.packMode;
+  $('#searchWrap').hidden = !hasDrugs;
+
+  let html = '';
+  if (!hasDrugs) {
+    html = `<div class="empty">
+      <h2>お薬手帳を読み取ってください</h2>
+      <p>読み取った薬は医療機関ごとに並びます。数量はシート単位・バラ単位で何度でも足せます。</p>
+      <div class="acts">
+        <button class="btn primary" data-act="scan">お薬手帳を読み取る</button>
+        <button class="btn" data-act="sample">サンプルで試す</button>
+      </div>
+      ${sessions.some(s => s.id !== ui.sid) ? `<button class="btn" data-act="sessions">保存した患者を再開（${sessions.filter(s => s.id !== ui.sid).length}件）</button>` : ''}
+    </div>`;
+  } else {
+    if (state.packs.length && !ui.packMode && !ui.search.trim()) {
+      html += `<section><h2 class="group-title">一包化</h2><div class="card">${state.packs.map(p => `
+        <div class="pack-card" data-act="editPack" data-id="${p.id}" role="button" tabindex="0">
+          <div class="ph"><span>${esc(p.name)}</span><b>計 ${packTotal(p)} 包</b></div>
+          <div>${esc(packSummary(p) || '包数未入力')}</div>
+          <div class="sub">${esc(p.drugIds.map(id => findDrug(id)).filter(Boolean).map(r => displayName(r.drug)).join('、'))}</div>
+        </div>`).join('')}</div></section>`;
+    }
+    let shown = 0;
+    for (const c of state.clinics) {
+      const ds = c.drugs.filter(matches);
+      if (!ds.length) continue;
+      shown += ds.length;
+      html += `<section class="clinic"><h2>${esc(c.name)}</h2><div class="card">${ds.map(rowHtml).join('')}</div></section>`;
+    }
+    if (!shown) html += `<p class="muted">「${esc(ui.search)}」に一致する薬はありません。</p>`;
+    if (!ui.packMode) html += `<div style="display:grid;gap:10px">
+      <button class="btn" data-act="addPanel" style="min-height:52px">＋ 手帳にない薬を追加（GS1・名前検索）</button>
+      <button class="btn primary" data-act="report" style="min-height:52px">鑑別レポートを作成</button></div>`;
+  }
+  $('#list').innerHTML = html;
+  renderBottom();
+}
+
+function renderBottom() {
+  const b = $('#bottom'), inner = $('#bottomInner');
+  if (ui.packMode) {
+    b.hidden = false;
+    inner.innerHTML = `<button class="btn primary" data-act="makePack" ${ui.selected.length ? '' : 'disabled'} style="min-height:50px">選択した ${ui.selected.length} 品目で一包化を入力</button>`;
+    return;
+  }
+  const rec = recentHtml(null, 'open');
+  const last = ui.undo[ui.undo.length - 1];
+  if (!rec && !last && !ui.note) { b.hidden = true; return; }
+  b.hidden = false;
+  inner.innerHTML = (ui.note ? `<p class="muted" role="status">${esc(ui.note)}</p>` : '') + rec
+    + (last ? `<div class="undo"><span class="msg">${esc(last.msg)}</span><button class="btn" data-act="undo">取消</button></div>` : '');
+}
+
+function bump(id) {
+  const q = document.querySelector(`[data-qty="${id}"]`);
+  if (q) { q.classList.remove('bump'); void q.offsetWidth; q.classList.add('bump'); }
+  const t = document.querySelector('#heatTotal');
+  if (t) { t.classList.remove('bump'); void t.offsetWidth; t.classList.add('bump'); }
+}
+
+function refresh(bumpId) {
+  renderMain();
+  if (ui.panel) renderPanel();
+  if (bumpId) bump(bumpId);
+}
+
+/* ================= パネル ================= */
+function openPanel(p) {
+  ui.panel = p;
+  $('#panel').hidden = false;
+  document.body.classList.add('locked');
+  renderPanel(true);
+}
+function closePanel() {
+  ui.panel = null;
+  $('#panel').hidden = true;
+  document.body.classList.remove('locked');
+  renderMain();
+}
+
+function renderPanel(resetScroll) {
+  const p = ui.panel; if (!p) return;
+  const body = $('#pbody');
+  const keep = resetScroll ? 0 : body.scrollTop;
+  const r = PANELS[p.type]();
+  $('#phead').innerHTML = `<div class="l">${r.left || ''}</div><h2>${esc(r.title)}</h2><div class="r">${r.right || ''}</div>`;
+  $('#pbodyInner').innerHTML = r.body;
+  $('#pfootInner').innerHTML = r.foot || '';
+  $('#pfoot').hidden = !r.foot;
+  body.scrollTop = keep;
+}
+
+const PANELS = {
+  scan() {
+    return {
+      title: 'お薬手帳の読み取り',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>画像を取り込んでOCR<small>端末内で処理・通信なし</small></h3>
+          <div class="ocr-btns">
+            <button class="btn primary" data-act="camOpen" id="camBtn">カメラで撮る（無音）</button>
+            <label class="btn filebtn" for="ocrFile">写真を選ぶ</label>
+            <input type="file" id="ocrFile" accept="image/*" multiple hidden>
+          </div>
+          <p class="muted" id="camNote" ${ui.camBlocked ? '' : 'hidden'}>この画面ではページから直接カメラを使えません。「写真を選ぶ」を使ってください（「写真を撮る」はiPhoneの標準カメラが開くためシャッター音が鳴ります。無音にしたい場合は、カメラアプリで手帳を映した画面を<b>スクリーンショット</b>して、その画像を選んでください）。</p>
+          <div class="ocr-status" id="ocrStatus" ${OCR.status ? '' : 'hidden'}>
+            <div class="ocr-bar"><span id="ocrBar" style="width:${Math.round((OCR.progress || 0) * 100)}%"></span></div>
+            <p class="muted" id="ocrMsg">${esc(OCR.status || '')}</p>
+          </div>
+          <p class="muted">1ページずつ、手帳を平らにして真上から撮ると精度が上がります。読み取った文字は下の枠に追加されるので、確認・修正してから「解析する」を押してください。初回だけOCRの準備（約6MB）に時間がかかります。</p>
+        </div>
+        <details class="block">
+          <summary><b>ほかの読み取り方：iPhoneの「テキストをスキャン」</b></summary>
+          <ol class="steps" style="margin-top:8px">
+            <li>下の枠をタップ → もう一度タップ → <b>「自動入力」</b> → <b>「テキストをスキャン」</b>（iOS 16以前はメニューに直接表示）</li>
+            <li>お薬手帳を1ページずつ映し、文字が黄色く囲まれたら <b>「入力」</b></li>
+          </ol>
+          <p class="muted" style="margin-top:8px"><b>「テキストをスキャン」が出ないとき：</b></p>
+          <ol class="steps" style="margin-top:8px">
+            <li>Claudeアプリ内で開いている場合は出ないことがあります。<b>Safariで開き直してください</b>（Safariで開いたら、共有 →「ホーム画面に追加」しておくと次回からすぐ開けます）</li>
+            <li>設定 → 一般 → 言語と地域 → <b>「テキスト認識表示（ライブテキスト）」</b> をオン</li>
+            <li>iOS 16以降が必要です（日本語の認識のため）。iPhone XS／XR以降が対象です</li>
+          </ol>
+          <p class="muted" style="margin-top:8px"><b>代わりの方法（無音）：</b>標準の<b>カメラアプリ</b>でお薬手帳を映し、撮影せずに右下の <b>文字認識ボタン（枠の中に3本線）</b> をタップ →「すべてを選択」→「コピー」→ この枠を長押しして「ペースト」。</p>
+        </details>
+        <textarea class="scanbox" id="scanText" placeholder="読み取った文字がここに入ります（直接入力・貼り付けもできます）"autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">${esc(ui.scanText)}</textarea>
+        <div class="inline">
+          <button class="btn" data-act="scanClear">枠を空にする</button>
+          <button class="btn" data-act="scanSample">サンプル文を入れる</button>
+        </div>`,
+      foot: `<button class="btn primary" data-act="analyze">解析する</button>`
+    };
+  },
+
+  review() {
+    const rv = ui.panel.review;
+    const body = (rv.clinics.length ? '' : `<div class="block"><p class="muted">薬品を検出できませんでした。読み取り直すか、下の「医療機関を追加」から手入力してください。</p></div>`)
+      + rv.clinics.map((c, ci) => `
+        <div class="block rv-clinic">
+          <div class="rv-head">
+            <input class="txt" data-rv="${ci}|-1|name" value="${esc(c.name)}" placeholder="医療機関名" aria-label="医療機関名">
+            <button class="x" data-act="rvDelClinic" data-i="${ci}" aria-label="医療機関を削除">✕</button>
+          </div>
+          ${c.drugs.map((d, di) => `
+            <div class="rv-drug">
+              <div class="rv-top">
+                <input class="txt" data-rv="${ci}|${di}|name" value="${esc(d.name)}" placeholder="薬品名" aria-label="薬品名">
+                <button class="x" data-act="rvDelDrug" data-i="${ci}" data-j="${di}" aria-label="薬品を削除">✕</button>
+              </div>
+              ${Master.ready ? (matched(d)
+                ? `<div class="rv-badge ok">✓ マスター照合 ${Math.round((d.matchSim || 1) * 100)}%${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>`
+                : `<div class="rv-badge ng">マスター未照合（取り込み後、数量入力画面で候補から選べます）</div>`) : ''}
+              <div class="rv-pair"><span>用量</span><input class="txt" data-rv="${ci}|${di}|dose" value="${esc(d.dose)}" placeholder="例: 1錠"></div>
+              <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
+            </div>`).join('')}
+          <button class="btn" data-act="rvAddDrug" data-i="${ci}">＋ 薬品を追加</button>
+        </div>`).join('')
+      + `<button class="btn" data-act="rvAddClinic">＋ 医療機関を追加</button>
+         <details class="block"><summary>読み取った全文</summary><pre>${esc(rv.raw)}</pre></details>`;
+    return {
+      title: '読み取り結果の確認',
+      left: `<button class="btn ghost" data-act="backToScan">‹ 戻る</button>`,
+      body,
+      foot: `<button class="btn" data-act="rvNext">追加して次ページ</button><button class="btn primary" data-act="rvDone">追加して数量入力へ</button>`
+    };
+  },
+
+  heat() {
+    const id = ui.panel.id;
+    const r = findDrug(id);
+    if (!r) return { title: '数量入力', right: `<button class="btn ghost" data-act="close">完了</button>`, body: '<p class="muted">薬品が見つかりません。</p>' };
+    const d = r.drug, u = unit(d), t = total(d);
+    const ids = allIds(), pos = ids.indexOf(id);
+    const info = [d.dose, d.usage].filter(Boolean).join(' / ');
+    const confirm = ui.panel.confirm === 'deleteDrug';
+    return {
+      title: '数量入力',
+      right: `<button class="btn ghost" data-act="close">完了</button>`,
+      body: `
+        ${recentHtml(id, 'switch')}
+        ${ui.note ? `<p class="okline" role="status">${esc(ui.note)}</p>` : ''}
+        <div class="block hero">
+          <div class="cl">${esc(r.clinic.name)}</div>
+          <div class="nm">${esc(displayName(d))}</div>
+          ${info ? `<div class="inf">${esc(info)}</div>` : ''}
+          ${isExt(d)
+            ? `<div class="total" id="heatTotal"><span class="t-l">持参</span><span class="t-n" style="font-size:30px">${esc(extText(d) || 'なし')}</span></div><div class="bdl">外用</div>`
+            : `<div class="total" id="heatTotal"><span class="t-l">合計</span><span class="t-n">${qty(t)}</span><span class="t-u">${u}</span></div>
+          <div class="bdl">${esc(breakdown(d))}</div>`}
+        </div>
+
+        ${isExt(d) ? extBlocks(d) : `<div class="block">
+          <h3>シート<small>タップするたびに1シート加算</small></h3>
+          <div class="sizes">
+            ${[10, 14, 21, 7].map(s => `<button class="seg${d.sheetSize === s ? ' on' : ''}" data-act="size" data-v="${s}">${s}</button>`).join('')}
+            <div class="stepper">
+              <button data-act="sizeStep" data-v="-1" aria-label="1シートの数を減らす">−</button>
+              <span class="v">${d.sheetSize}${u}</span>
+              <button data-act="sizeStep" data-v="1" aria-label="1シートの数を増やす">＋</button>
+            </div>
+          </div>
+          <div class="sheetbtns">
+            <button class="btn danger" data-act="sheetMinus" aria-label="${d.sheetSize}${u}シートを1枚減らす">−1</button>
+            <button class="btn primary" data-act="sheetPlus">＋1シート（+${d.sheetSize}${u}）</button>
+          </div>
+        </div>
+
+        <div class="block">
+          <h3>バラ（端数）</h3>
+          <div class="grid5">
+            ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button data-act="loose" data-v="${n}">+${n}</button>`).join('')}
+            <button data-act="loose" data-v="0.5">+½</button>
+          </div>
+          <div class="other">
+            <input id="looseInput" inputmode="decimal" placeholder="その他の数（例: 12、マイナスも可）" autocomplete="off">
+            <button class="btn" data-act="looseAdd">追加</button>
+          </div>
+        </div>`}
+
+        <div class="block">
+          <h3>入力明細<small>✕ で個別に削除</small></h3>
+          <div class="entries">
+            ${d.entries.length ? d.entries.slice().reverse().map(e => `
+              <div class="entry"><span class="e-l">${esc(entryLabel(e, u))}</span>
+                <span class="e-t">${new Date(e.at).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span>
+                <button data-act="delEntry" data-e="${e.id}" aria-label="この明細を削除">✕</button></div>`).join('')
+              : '<p class="muted">まだ入力がありません</p>'}
+          </div>
+        </div>
+
+        ${matchBlock(d)}
+
+        <div class="block">
+          <h3>薬品情報（修正できます）</h3>
+          <div class="field"><label for="f-name">薬品名</label><input id="f-name" data-f="name" value="${esc(d.name)}"></div>
+          <div class="field"><label for="f-dose">用量</label><input id="f-dose" data-f="dose" value="${esc(d.dose)}"></div>
+          <div class="field"><label for="f-usage">用法</label><textarea id="f-usage" data-f="usage" rows="2">${esc(d.usage)}</textarea></div>
+          <button class="btn" data-act="toggleExt">${isExt(d) ? '内服薬として扱う（シート・錠数で数える）' : '外用薬として扱う（本数で数える）'}</button>
+          ${confirm
+            ? `<div class="confirm"><p>この薬を一覧から削除しますか？</p><div class="inline"><button class="btn danger" data-act="delDrugYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
+            : `<button class="btn danger" data-act="delDrugAsk">この薬を削除</button>`}
+        </div>`,
+      foot: `<button class="btn" data-act="step" data-v="-1" ${pos <= 0 ? 'disabled' : ''}>‹ 前の薬</button>
+             <span class="pos">${pos + 1} / ${ids.length}</span>
+             <button class="btn" data-act="step" data-v="1" ${pos >= ids.length - 1 ? 'disabled' : ''}>次の薬 ›</button>`
+    };
+  },
+
+  pack() {
+    const pk = ui.panel.pack;
+    const exists = state.packs.some(p => p.id === pk.id);
+    const confirm = ui.panel.confirm === 'deletePack';
+    return {
+      title: pk.name || '一包化',
+      left: `<button class="btn ghost" data-act="close">キャンセル</button>`,
+      body: `
+        <div class="block">
+          <div class="field"><label for="pk-name">名称</label><input id="pk-name" data-pk="name" value="${esc(pk.name)}"></div>
+        </div>
+        <div class="block">
+          <h3>包数</h3>
+          ${TIMINGS.map(([k, l]) => `
+            <div class="timing">
+              <span class="tl">${l}</span>
+              <button data-act="tm" data-k="${k}" data-v="-1" aria-label="${l}を1包減らす">−</button>
+              <input inputmode="numeric" data-tm="${k}" value="${pk.counts[k] || ''}" placeholder="0" aria-label="${l}の包数">
+              <button class="plus" data-act="tm" data-k="${k}" data-v="1" aria-label="${l}を1包増やす">＋</button>
+            </div>`).join('')}
+          <div class="pk-total" id="pkTotal">合計 ${packTotal(pk)} 包</div>
+        </div>
+        <div class="block">
+          <h3>対象品目<small>タップで切替</small></h3>
+          <div>${state.clinics.flatMap(c => c.drugs.map(d => {
+            const sel = pk.drugIds.includes(d.id);
+            return `<div class="pick${sel ? ' sel' : ''}" data-act="pkToggle" data-id="${d.id}" role="button" tabindex="0">
+              <span class="check" aria-hidden="true">${sel ? '✓' : ''}</span>
+              <div class="info"><div class="dname">${esc(displayName(d))}</div><div class="sub">${esc(c.name)}</div></div></div>`;
+          })).join('')}</div>
+        </div>
+        ${exists ? (confirm
+          ? `<div class="confirm"><p>この一包化を削除しますか？</p><div class="inline"><button class="btn danger" data-act="delPackYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
+          : `<button class="btn danger" data-act="delPackAsk">この一包化を削除</button>`) : ''}`,
+      foot: `<button class="btn primary" data-act="savePack" ${pk.drugIds.length ? '' : 'disabled'}>保存</button>`
+    };
+  },
+
+  add() {
+    const p = ui.panel;
+    const names = [...state.clinics.map(c => c.name).filter(n => n !== OUTSIDE), OUTSIDE];
+    return {
+      title: '薬を追加',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>追加先</h3>
+          <div class="sizes">${names.map(n => `<button class="seg${p.clinic === n ? ' on' : ''}" data-act="addClinic" data-v="${esc(n)}" style="padding:0 10px">${esc(n)}</button>`).join('')}</div>
+        </div>
+        ${Master.ready ? '' : `<div class="block"><p class="warnline">医薬品マスターが未取り込みです</p><p class="muted">GS1コードと名前検索を使うには、メニュー →「医薬品マスター」で取り込んでください。名前の手入力は今でもできます。</p></div>`}
+        <div class="block">
+          <h3>薬品名で探す</h3>
+          <button class="btn primary" data-act="voice" data-target="addSearch" style="min-height:56px;font-size:17px">音声で探す</button>
+          <p class="muted" id="voiceHint" hidden>キーボードのマイクを押して薬品名を話してください（例：「ロキソプロフェン 60ミリ」）。話した内容から候補を出します。</p>
+          <div class="field"><label for="addSearch">薬品名（音声・ひらがな・一部でも可）</label>
+            <input id="addSearch" placeholder="例: ろきそにん 60" autocomplete="off" autocorrect="off" spellcheck="false"></div>
+          <p class="muted">すでに一覧にある薬を選ぶと、その薬の数量入力画面が開きます。</p>
+          <div id="mResults">${p.cands ? candList(p.cands, 'addPick') : ''}</div>
+          <button class="btn" data-act="addManual">見つからない場合：名前を手入力して追加</button>
+        </div>`
+    };
+  },
+
+  master() {
+    const p = ui.panel;
+    const confirm = p.confirm === 'clearMaster';
+    return {
+      title: '医薬品マスター',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>現在の状態</h3>
+          ${Master.ready
+            ? `<p class="okline">${Master.items.length.toLocaleString()}品目（GS1コード ${Master.gs1.size.toLocaleString()}件）</p>
+               <p class="muted">取り込み日 ${esc(Master.meta?.date || '')}／${esc((Master.meta?.files || []).join('、'))}</p>`
+            : '<p class="warnline">未取り込み</p>'}
+          <p class="muted" id="masterMsg" role="status">${esc(p.msg || '')}</p>
+        </div>
+        <div class="block filepick">
+          <h3>ファイルを取り込む（追加・上書き）</h3>
+          <input type="file" id="masterFile" multiple accept=".csv,.txt,.tsv,.xlsx,.xls,text/csv,text/plain">
+          <p class="muted">CSV・TXT・Excelに対応します。Shift_JISのファイルもそのまま読めます。列は見出しや中身から自動で判定します（販売名・YJコード・GS1／JANコード・HOTコード）。</p>
+        </div>
+        <div class="block">
+          <h3>どのファイルを使うか</h3>
+          <ol class="steps">
+            <li><b>薬品名とYJコード</b>：厚生労働省「薬価基準収載品目リスト」（Excel）、またはMEDIS「医薬品HOTコードマスター」</li>
+            <li><b>GS1コード</b>：MEDIS「医薬品HOTコードマスター」に含まれるGS1（販売包装単位・調剤包装単位）コードの表。名前のない対応表はHOTコードで自動的に結びつけます</li>
+            <li>iPhoneではSafariでダウンロード →「ファイル」アプリに保存。ZIPはタップして展開してから選んでください</li>
+            <li>月1回ほど新しいファイルを取り込むと、新薬・新しいGEに対応できます</li>
+          </ol>
+          <p class="muted">マスターはこのiPhoneのブラウザ内だけに保存されます。</p>
+        </div>
+        <div class="menu-list">
+          <button class="btn" data-act="rematch" ${Master.ready ? '' : 'disabled'}>一覧の未照合の薬をまとめて照合</button>
+          ${confirm
+            ? `<div class="confirm"><p>取り込んだマスターを削除しますか？</p><div class="inline"><button class="btn danger" data-act="clearMasterYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
+            : `<button class="btn danger" data-act="clearMasterAsk" ${Master.ready ? '' : 'disabled'}>マスターを削除</button>`}
+        </div>`
+    };
+  },
+
+  report() {
+    const p = ui.panel;
+    if (p.saved) {
+      return {
+        title: p.saved.label || '保存したレポート',
+        left: `<button class="btn ghost" data-act="sessions">‹ 戻る</button>`,
+        body: `
+          <p class="muted">${esc(fmtTime(p.saved.savedAt))} に保存したレポートです。</p>
+          <textarea class="scanbox" id="reportText" style="min-height:60vh;border-style:solid" spellcheck="false">${esc(p.text)}</textarea>
+          <p class="muted" id="copyNote" role="status"></p>`,
+        foot: `<button class="btn primary" data-act="reportCopy">コピー</button>`
+      };
+    }
+    return {
+      title: '鑑別レポート',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <p class="muted">医療機関ごと・用法ごと（分の少ない順、食前→食後）に並べています。ここで直接修正してから保存・コピーできます。</p>
+        <textarea class="scanbox" id="reportText" style="min-height:55vh;border-style:solid" spellcheck="false">${esc(p.text)}</textarea>
+        <p class="okline" id="copyNote" role="status">${esc(p.msg || '')}</p>
+        ${ui.reports.length ? `<div class="block">
+          <h3>この患者の保存済みレポート<small>タップで表示</small></h3>
+          <div class="cands">${ui.reports.map((r, i) => `<button class="cand" data-act="reportLoad" data-i="${i}">
+            <span class="cn">${esc(fmtTime(r.savedAt))}</span><span class="cs">${esc(r.text.split('\n').slice(1, 3).join(' '))}</span></button>`).join('')}</div>
+        </div>` : ''}`,
+      foot: `<button class="btn" data-act="reportRebuild">作り直す</button><button class="btn" data-act="reportSave">保存</button><button class="btn primary" data-act="reportCopy">コピー</button>`
+    };
+  },
+
+  sessions() {
+    const p = ui.panel;
+    const others = sessions.filter(s => s.id !== ui.sid);
+    return {
+      title: '患者の保存・再開',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>入力中の患者<small>自動で保存されます</small></h3>
+          <div class="field"><label for="sLabel">患者名・ID・病棟など（一覧で見分けるため）</label>
+            <input id="sLabel" value="${esc(ui.label)}" placeholder="例: 3A 12号室 山田様" autocomplete="off"></div>
+          <p class="muted">${drugCount(state)}品目／保存したレポート ${ui.reports.length}件</p>
+          <button class="btn primary" data-act="newSession" style="min-height:52px">新しい患者を始める（今の内容は保存されます）</button>
+        </div>
+        <div class="block">
+          <h3>保存済みの患者<small>新しい順</small></h3>
+          ${!sessionsLoaded ? '<p class="muted">読み込み中…</p>' : !others.length ? '<p class="muted">まだありません。「新しい患者を始める」を押すと、今の患者がここに残ります。</p>' : others.map(s => `
+            <div class="pick" style="cursor:default;align-items:flex-start">
+              <div class="info">
+                <div class="dname">${esc(s.label || '（名前なし）')}</div>
+                <div class="sub">${esc(fmtTime(s.updatedAt))}・${drugCount(s.state)}品目</div>
+                <div class="tags"><span class="tag${s.reports?.length ? '' : ' warn'}">${s.reports?.length ? 'レポート保存済' : '入力中'}</span></div>
+                ${p.confirmId === s.id
+                  ? `<div class="confirm" style="margin-top:8px"><p>この患者のデータを削除しますか？</p><div class="inline"><button class="btn danger" data-act="sessionDelYes" data-id="${s.id}">削除する</button><button class="btn" data-act="sessionDelNo">やめる</button></div></div>`
+                  : `<div class="inline" style="margin-top:8px">
+                      <button class="btn primary" data-act="resume" data-id="${s.id}">再開</button>
+                      ${s.reports?.length ? `<button class="btn" data-act="savedReport" data-id="${s.id}">レポート</button>` : ''}
+                      <button class="btn danger" data-act="sessionDelAsk" data-id="${s.id}">削除</button></div>`}
+              </div>
+            </div>`).join('')}
+        </div>
+        <p class="muted">保存先はこのiPhoneのブラウザ内だけです。Safariの「履歴とWebサイトデータを消去」を行うと消えるため、レポートはコピーして電子カルテ等に残してください。</p>`
+    };
+  },
+
+  menu() {
+    const confirm = ui.panel.confirm === 'reset';
+    return {
+      title: 'メニュー',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="menu-list">
+          <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
+          <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
+          <button class="btn" data-act="masterPanel">医薬品マスター（${Master.ready ? Master.items.length.toLocaleString() + '品目' : '未取り込み'}）</button>
+          <button class="btn" data-act="scanFromMenu">お薬手帳を読み取る</button>
+          <button class="btn" data-act="report">鑑別レポートを作成</button>
+          ${confirm
+            ? `<div class="confirm"><p>入力中の患者のデータ（薬・数量・一包化・レポート）を保存せずに消去しますか？</p><div class="inline"><button class="btn danger" data-act="resetYes">消去する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
+            : `<button class="btn danger" data-act="resetAsk">入力中の患者を消去</button>`}
+        </div>
+        <div class="block">
+          <h3>データの保存について</h3>
+          <p class="muted">入力内容はこのiPhoneのブラウザ内にだけ保存され、外部には送信されません。Safariの「履歴とWebサイトデータを消去」を行うと消えます。プライベートブラウズでは保存されません。</p>
+        </div>`
+    };
+  }
+};
+
+function candList(list, act) {
+  if (!list || !list.length) return '<p class="muted">候補が見つかりません。名前の一部（例: アムロジピン 5）で検索してください。</p>';
+  return `<div class="cands">${list.map((c, i) => `<button class="cand" data-act="${act}" data-i="${i}">
+    <span class="cn">${esc(c.n)}</span><span class="cs">YJ ${esc(c.y || 'なし')} · 一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`;
+}
+const gs1Field = (act) => `
+  <div class="field"><label for="gs1In">GS1コードで特定（バーコードリーダー・番号入力）</label>
+    <div class="other"><input id="gs1In" inputmode="numeric" placeholder="(01)14987…" autocomplete="off" autocorrect="off" spellcheck="false">
+    <button class="btn" data-act="${act}">特定</button></div>
+    <p class="muted" id="gs1Msg" role="status"></p></div>`;
+
+function matchBlock(d) {
+  if (!Master.ready) return `<div class="block"><h3>医薬品マスター照合</h3>
+    <p class="muted">マスターが未取り込みです。メニュー →「医薬品マスター」から取り込むと、名前の表記揺れの修正とYJコードの取得ができます。</p></div>`;
+  const q = d.rawName || d.name;
+  if (ui.panel.candsFor !== q) { ui.panel.cands = searchMaster(q, 6); ui.panel.candsFor = q; }
+  return `<div class="block">
+    <h3>医薬品マスター照合</h3>
+    ${matched(d)
+      ? `<p class="okline">✓ 照合済　YJ <span class="num">${esc(d.yj || 'なし')}</span></p>
+         ${d.rawName && d.rawName !== d.name ? `<p class="muted">読み取り名：${esc(d.rawName)}</p>` : ''}
+         ${d.gs1 ? `<p class="muted">GS1：<span class="num">${esc(d.gs1)}</span></p>` : ''}
+         <button class="btn" data-act="unmatch">照合を外す</button>`
+      : `<p class="warnline">未照合です。下の候補から正しい薬を選んでください。</p>`}
+    <div class="field"><label for="mSearch">名前で検索して修正（音声入力可）</label>
+      <div class="other"><input id="mSearch" placeholder="例: アムロジピン 5ミリ" autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="btn primary" data-act="voice" data-target="mSearch">音声で探す</button></div>
+      <p class="muted" id="voiceHint" hidden>キーボードのマイクを押して薬品名を話してください。話した内容から候補を出します。</p></div>
+    <div id="mResults">${candList(ui.panel.cands, 'applyCand')}</div>
+  </div>`;
+}
+
+function extBlocks(d) {
+  const u = extUnit(d), { full, open } = extCounts(d);
+  const row = (k, label, n) => `
+    <div class="timing" style="grid-template-columns:4.8em 44px 1fr 44px">
+      <span class="tl">${label}</span>
+      <button data-act="extMinus" data-k="${k}" aria-label="${label}を1${u}減らす">−</button>
+      <span class="num" style="text-align:center;font-size:22px;font-weight:700">${qty(n)}${u}</span>
+      <button class="plus" data-act="extPlus" data-k="${k}" aria-label="${label}を1${u}増やす">＋</button>
+    </div>`;
+  return `<div class="block">
+    <h3>外用薬の数量</h3>
+    <div class="sizes">${['本', '袋', '枚', '個', '瓶', '箱'].map(x => `<button class="seg${u === x ? ' on' : ''}" data-act="extUnit" data-v="${x}">${x}</button>`).join('')}</div>
+    ${row('full', '未開封', full)}
+    ${row('open', '使いかけ', open)}
+  </div>`;
+}
+
+/* ================= 操作 ================= */
+function openHeat(id) { touch(id); save(); openPanel({ type: 'heat', id }); }
+
+function makeReview(text) {
+  const clinics = parse(text);
+  for (const c of clinics) for (const d of c.drugs) autoMatch(d);
+  return { clinics, raw: text };
+}
+
+const actions = {
+  scan: () => openPanel({ type: 'scan' }),
+  scanFromMenu: () => openPanel({ type: 'scan' }),
+  sample: () => { ui.scanText = SAMPLE; save(); openPanel({ type: 'scan' }); },
+  close: closePanel,
+  menu: () => openPanel({ type: 'menu' }),
+  packMode: () => { ui.packMode = !ui.packMode; ui.selected = []; renderMain(); },
+  open: el => openHeat(el.dataset.id),
+  select: el => {
+    const id = el.dataset.id;
+    ui.selected = ui.selected.includes(id) ? ui.selected.filter(x => x !== id) : [...ui.selected, id];
+    renderMain();
+  },
+  quick: el => {
+    const r = findDrug(el.dataset.id); if (!r) return;
+    if (isExt(r.drug)) addHeat(r.drug.id, null, 1, 'full');
+    else addHeat(r.drug.id, r.drug.sheetSize, 1);
+  },
+  extUnit: el => { findDrug(ui.panel.id).drug.extUnit = el.dataset.v; save(); refresh(); },
+  extPlus: el => addHeat(ui.panel.id, null, 1, el.dataset.k),
+  extMinus: el => removeLastExt(ui.panel.id, el.dataset.k),
+  toggleExt: () => { const d = findDrug(ui.panel.id).drug; d.ext = !isExt(d); save(); refresh(); },
+  undo: undoLast,
+  makePack: () => {
+    const letter = String.fromCharCode(65 + Math.min(state.packs.length, 25));
+    const pack = { id: uid(), name: '一包化' + letter, drugIds: [...ui.selected], counts: {} };
+    ui.packMode = false; ui.selected = [];
+    renderMain();
+    openPanel({ type: 'pack', pack });
+  },
+  editPack: el => {
+    const p = state.packs.find(x => x.id === el.dataset.id);
+    if (p) openPanel({ type: 'pack', pack: JSON.parse(JSON.stringify(p)) });
+  },
+
+  // 読み取り
+  camOpen: () => camOpen(),
+  camClose: () => camClose(),
+  camShot: () => camShot(),
+  camTorch: () => camTorch(),
+  scanClear:() => { ui.scanText = ''; save(); renderPanel(); },
+  scanSample: () => { ui.scanText = SAMPLE; save(); renderPanel(); },
+  analyze: () => {
+    const text = ui.scanText.trim();
+    if (!text) { const t = $('#scanText'); if (t) t.focus(); return; }
+    openPanel({ type: 'review', review: makeReview(text) });
+  },
+  backToScan: () => openPanel({ type: 'scan' }),
+  rvDelClinic: el => { ui.panel.review.clinics.splice(+el.dataset.i, 1); renderPanel(); },
+  rvDelDrug: el => { ui.panel.review.clinics[+el.dataset.i].drugs.splice(+el.dataset.j, 1); renderPanel(); },
+  rvAddDrug: el => { ui.panel.review.clinics[+el.dataset.i].drugs.push(newDrug()); renderPanel(); },
+  rvAddClinic: () => { ui.panel.review.clinics.push({ id: uid(), name: '', drugs: [newDrug()] }); renderPanel(); },
+  rvNext: () => {
+    const r = merge(ui.panel.review.clinics);
+    ui.scanText = ''; save();
+    openPanel({ type: 'scan' });
+    flashNote(r);
+  },
+  rvDone: () => {
+    const r = merge(ui.panel.review.clinics);
+    ui.scanText = ''; save();
+    closePanel();
+    flashNote(r);
+  },
+
+  // ヒート
+  switch: el => { ui.panel.id = el.dataset.id; ui.panel.confirm = null; touch(el.dataset.id); save(); renderPanel(true); renderMain(); },
+  size: el => { const r = findDrug(ui.panel.id); r.drug.sheetSize = +el.dataset.v; save(); refresh(); },
+  sizeStep: el => {
+    const r = findDrug(ui.panel.id);
+    r.drug.sheetSize = Math.min(100, Math.max(1, r.drug.sheetSize + +el.dataset.v));
+    save(); refresh();
+  },
+  sheetPlus: () => { const r = findDrug(ui.panel.id); addHeat(ui.panel.id, r.drug.sheetSize, 1); },
+  sheetMinus: () => { const r = findDrug(ui.panel.id); removeLastSheet(ui.panel.id, r.drug.sheetSize); },
+  loose: el => addHeat(ui.panel.id, null, +el.dataset.v),
+  looseAdd: () => {
+    const inp = $('#looseInput');
+    const v = parseFloat((inp?.value || '').replace(',', '.').replace(/[^\d.\-]/g, ''));
+    if (!isFinite(v) || !v) { inp?.focus(); return; }
+    addHeat(ui.panel.id, null, v);
+  },
+  delEntry: el => removeEntry(ui.panel.id, el.dataset.e),
+  step: el => {
+    const ids = allIds(), i = ids.indexOf(ui.panel.id) + +el.dataset.v;
+    if (i >= 0 && i < ids.length) { ui.panel.id = ids[i]; ui.panel.confirm = null; touch(ids[i]); save(); renderPanel(true); renderMain(); }
+  },
+  delDrugAsk: () => { ui.panel.confirm = 'deleteDrug'; renderPanel(); },
+  delDrugYes: () => { deleteDrug(ui.panel.id); closePanel(); },
+  cancelConfirm: () => { ui.panel.confirm = null; renderPanel(); },
+
+  // 一包化
+  tm: el => {
+    const pk = ui.panel.pack, k = el.dataset.k;
+    pk.counts[k] = Math.max(0, (pk.counts[k] || 0) + +el.dataset.v);
+    renderPanel();
+  },
+  pkToggle: el => {
+    const pk = ui.panel.pack, id = el.dataset.id;
+    pk.drugIds = pk.drugIds.includes(id) ? pk.drugIds.filter(x => x !== id) : [...pk.drugIds, id];
+    renderPanel();
+  },
+  savePack: () => {
+    const pk = ui.panel.pack;
+    if (!pk.name.trim()) pk.name = '一包化';
+    const i = state.packs.findIndex(p => p.id === pk.id);
+    if (i >= 0) state.packs[i] = pk; else state.packs.push(pk);
+    save(); closePanel();
+  },
+  delPackAsk: () => { ui.panel.confirm = 'deletePack'; renderPanel(); },
+  delPackYes: () => { state.packs = state.packs.filter(p => p.id !== ui.panel.pack.id); save(); closePanel(); },
+
+  // レポート
+  report: () => openPanel({ type: 'report', text: buildReport() }),
+  reportRebuild: () => { ui.panel.text = buildReport(); renderPanel(true); },
+  reportCopy: () => {
+    const ta = $('#reportText'), note = $('#copyNote');
+    const text = ta ? ta.value : ui.panel.text;
+    const fallback = () => { ta.focus(); ta.select(); ta.setSelectionRange(0, text.length); if (note) note.textContent = '全文を選択しました。メニューの「コピー」を押してください。'; };
+    try {
+      navigator.clipboard.writeText(text)
+        .then(() => { if (note) note.textContent = 'コピーしました。'; })
+        .catch(fallback);
+    } catch (e) { fallback(); }
+  },
+
+  // 照合（数量入力画面）
+  applyCand: el => {
+    const c = ui.panel.cands?.[+el.dataset.i]; const r = findDrug(ui.panel.id);
+    if (!c || !r) return;
+    applyMaster(r.drug, c, c.sim);
+    save(); refresh();
+  },
+  gs1Apply: () => {
+    const msg = $('#gs1Msg'), g = parseGS1($('#gs1In')?.value);
+    if (!g) { if (msg) msg.textContent = 'GS1コードとして読めませんでした。(01)から始まる14桁の番号を入れてください。'; return; }
+    const it = lookupGS1(g);
+    if (!it) { if (msg) msg.textContent = `マスターに該当する薬がありません（GS1 ${g}）。GS1を含むマスターを取り込んでいるか確認してください。`; return; }
+    applyMaster(findDrug(ui.panel.id).drug, it, 1, g);
+    save(); refresh();
+  },
+  unmatch: () => {
+    const d = findDrug(ui.panel.id).drug;
+    d.yj = ''; d.matchSim = 0; delete d.gs1;
+    save(); refresh();
+  },
+
+  // 音声入力：入力欄にフォーカスしてキーボードを開く（マイクはキーボードのボタン）
+  voice: el => {
+    const inp = document.getElementById(el.dataset.target);
+    if (!inp) return;
+    inp.value = '';
+    inp.focus();
+    inp.scrollIntoView({ block: 'center' });
+    const h = $('#voiceHint'); if (h) h.hidden = false;
+  },
+
+  // 薬の追加
+  addPanel: () => openPanel({ type: 'add', clinic: OUTSIDE }),
+  addClinic: el => { ui.panel.clinic = el.dataset.v; renderPanel(); },
+  addGs1: () => {
+    const msg = $('#gs1Msg'), inp = $('#gs1In'), g = parseGS1(inp?.value);
+    if (!g) { if (msg) msg.textContent = 'GS1コードとして読めませんでした。(01)から始まる14桁の番号を入れてください。'; return; }
+    const it = lookupGS1(g);
+    if (!it) { if (msg) msg.textContent = `マスターに該当する薬がありません（GS1 ${g}）。名前で探してください。`; inp.select(); return; }
+    addDrugFromMaster({ n: it.n, y: it.y || '' }, 1, g);
+  },
+  addPick: el => { const c = ui.panel.cands?.[+el.dataset.i]; if (c) addDrugFromMaster(c, c.sim); },
+  addManual: () => {
+    const name = ($('#addSearch')?.value || '').trim();
+    const d = newDrug(name);
+    clinicFor(ui.panel.clinic).drugs.push(d);
+    save();
+    openHeat(d.id);
+    if (!name) setTimeout(() => { const f = $('#f-name'); f?.scrollIntoView({ block: 'center' }); f?.focus(); }, 50);
+  },
+
+  // マスター
+  masterPanel: () => openPanel({ type: 'master' }),
+  rematch: () => { const n = rematchAll(); ui.panel.msg = `${n}品目を照合しました。残りは数量入力画面の候補から選んでください。`; refresh(); },
+  clearMasterAsk: () => { ui.panel.confirm = 'clearMaster'; renderPanel(); },
+  clearMasterYes: async () => {
+    Master.items = []; Master.meta = null; buildIndex();
+    await idbSet('master', null);
+    ui.panel.confirm = null; ui.panel.msg = 'マスターを削除しました。';
+    refresh();
+  },
+  resetAsk: () => { ui.panel.confirm = 'reset'; renderPanel(); },
+  resetYes: async () => { await deleteSession(ui.sid); closePanel(); },
+
+  // 患者の保存・再開
+  sessions: async () => { await archiveCurrent(); openPanel({ type: 'sessions' }); },
+  newSession: async () => { await startNewSession(); closePanel(); },
+  resume: async el => { await resumeSession(el.dataset.id); closePanel(); },
+  sessionDelAsk: el => { ui.panel.confirmId = el.dataset.id; renderPanel(); },
+  sessionDelNo: () => { ui.panel.confirmId = null; renderPanel(); },
+  sessionDelYes: async el => { await deleteSession(el.dataset.id); ui.panel.confirmId = null; renderPanel(); },
+  savedReport: el => {
+    const s = sessions.find(x => x.id === el.dataset.id);
+    const r = s?.reports?.[0]; if (!r) return;
+    openPanel({ type: 'report', text: r.text, saved: { label: s.label, savedAt: r.savedAt } });
+  },
+
+  // レポートの保存
+  reportSave: () => {
+    ui.reports = [{ id: uid(), text: ui.panel.text, savedAt: Date.now() }, ...ui.reports].slice(0, 10);
+    ui.panel.msg = `${fmtTime(ui.reports[0].savedAt)} に保存しました。`;
+    save(); archiveCurrent(); renderPanel();
+  },
+  reportLoad: el => {
+    const r = ui.reports[+el.dataset.i]; if (!r) return;
+    ui.panel.text = r.text; ui.panel.msg = `${fmtTime(r.savedAt)} に保存したレポートを表示しています。`;
+    renderPanel(true);
+  }
+};
+
+const OUTSIDE = '手帳外（持参のみ）';
+function clinicFor(name) {
+  let c = state.clinics.find(x => x.name === name);
+  if (!c) { c = { id: uid(), name, drugs: [] }; state.clinics.push(c); }
+  return c;
+}
+// すでに一覧にある薬なら、その薬を開く（「あ、もう1シートあった」に対応）
+function addDrugFromMaster(it, sim, gtin) {
+  for (const c of state.clinics) {
+    const d = c.drugs.find(x => (it.y && x.yj === it.y && x.name === it.n) || x.name === it.n);
+    if (d) { if (gtin && !d.gs1) d.gs1 = gtin; ui.note = `${displayName(d)} は一覧にあります（${c.name}）`; save(); openHeat(d.id); return; }
+  }
+  const d = newDrug(it.n);
+  d.yj = it.y || ''; d.matchSim = sim; if (gtin) d.gs1 = gtin;
+  clinicFor(ui.panel.clinic || OUTSIDE).drugs.push(d);
+  save();
+  openHeat(d.id);
+}
+
+function flashNote(r) {
+  ui.note = r.skipped ? `${r.added}品目を追加（重複${r.skipped}品目はスキップ）` : `${r.added}品目を追加しました`;
+  renderBottom();
+}
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-act]');
+  if (!el || el.disabled) return;
+  const fn = actions[el.dataset.act];
+  if (fn) { e.preventDefault(); fn(el); }
+});
+document.addEventListener('keydown', e => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[role="button"][data-act]')) {
+    e.preventDefault(); e.target.click();
+  }
+  if (e.key === 'Enter' && e.target.id === 'looseInput') { e.preventDefault(); actions.looseAdd(); }
+  if (e.key === 'Enter' && e.target.id === 'gs1In') { e.preventDefault(); (ui.panel?.type === 'add' ? actions.addGs1 : actions.gs1Apply)(); }
+});
+
+document.addEventListener('input', e => {
+  const t = e.target;
+  if (t.id === 'search') { ui.search = t.value; renderMain(); return; }
+  if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
+  if (t.id === 'reportText') { ui.panel.text = t.value; return; }
+  if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
+  if (t.id === 'mSearch' || t.id === 'addSearch') {
+    const q = t.value.trim();
+    ui.panel.cands = q ? searchMaster(q, 8, true) : null;
+    const box = $('#mResults');
+    if (box) box.innerHTML = ui.panel.cands ? candList(ui.panel.cands, t.id === 'addSearch' ? 'addPick' : 'applyCand') : '';
+    return;
+  }
+  if (t.dataset.rv) {
+    const [ci, di, f] = t.dataset.rv.split('|');
+    const c = ui.panel.review.clinics[+ci];
+    if (+di < 0) c.name = t.value;
+    else { c.drugs[+di][f] = t.value; if (f === 'name') { c.drugs[+di].yj = ''; c.drugs[+di].matchSim = 0; } }
+    return;
+  }
+  if (t.dataset.f && ui.panel?.type === 'heat') {
+    const r = findDrug(ui.panel.id);
+    if (r) {
+      r.drug[t.dataset.f] = t.value;
+      if (t.dataset.f === 'name') { r.drug.yj = ''; r.drug.matchSim = 0; r.drug.rawName = t.value; }
+      save(); renderMain();
+    }
+    return;
+  }
+  if (t.dataset.pk) { ui.panel.pack.name = t.value; return; }
+  if (t.dataset.tm) {
+    const n = parseInt(t.value.replace(/\D/g, ''), 10);
+    ui.panel.pack.counts[t.dataset.tm] = isFinite(n) ? n : 0;
+    const tot = $('#pkTotal'); if (tot) tot.textContent = `合計 ${packTotal(ui.panel.pack)} 包`;
+  }
+});
+document.addEventListener('change', async e => {
+  if (e.target.id === 'ocrFile' && e.target.files.length) {
+    const files = [...e.target.files];
+    e.target.value = '';
+    for (const f of files) ocrImage(f);
+    return;
+  }
+  if (e.target.dataset.f && ui.panel?.type === 'heat') renderPanel();
+  if (e.target.id === 'masterFile' && e.target.files.length) {
+    const files = [...e.target.files];
+    const msg = t => { ui.panel.msg = t; const m = $('#masterMsg'); if (m) m.textContent = t; };
+    try {
+      const r = await importMasterFiles(files, msg);
+      const n = rematchAll();
+      ui.panel.msg = `取り込み完了：${r.rowsDone.toLocaleString()}行を読み、${Master.items.length.toLocaleString()}品目になりました。`
+        + (r.linked ? `GS1対応表 ${r.linked.toLocaleString()}行をHOTコードで結びつけました。` : '')
+        + (r.unlinked ? `${r.unlinked.toLocaleString()}行は対応する薬品名が見つからず保留です（薬品名のファイルも取り込んでください）。` : '')
+        + (n ? `一覧の${n}品目を照合しました。` : '')
+        + (r.stored ? '' : '※このブラウザに保存できなかったため、ページを閉じると消えます。');
+    } catch (err) {
+      ui.panel.msg = '取り込めませんでした：' + (err?.message || err);
+    }
+    refresh();
+  }
+});
+
+// 画面を点けたままにする（対応ブラウザのみ）
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', keepAwake);
+document.addEventListener('click', keepAwake, { once: true });
+
+load();
+renderMain();
+idbGet('sessions').then(arr => {
+  sessions = Array.isArray(arr) ? arr : [];
+  sessionsLoaded = true;
+  archiveCurrent();
+  renderMain(); if (ui.panel) renderPanel();
+});
+// アプリを閉じる・切り替える直前にも保存
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') archiveCurrent(); });
+window.addEventListener('pagehide', () => archiveCurrent());
+idbGet('master').then(m => {
+  if (m && Array.isArray(m.items) && m.items.length) {
+    Master.items = m.items; Master.meta = m.meta; buildIndex();
+    renderMain(); if (ui.panel) renderPanel();
+  }
+});
+})();
+</script>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
+</script>
+</body></html>

@@ -1,0 +1,9 @@
+{
+  "name": "持参薬鑑別サポート",
+  "short_name": "持参薬鑑別",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#eef2ef",
+  "theme_color": "#0e6a5a",
+  "icons": [{ "src": "icon.png", "sizes": "512x512", "type": "image/png" }]
+}
