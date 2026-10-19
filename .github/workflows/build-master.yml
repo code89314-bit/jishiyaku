@@ -1,15 +1,22 @@
 name: 医薬品マスターを作成
 
-# master-src/ にファイルをアップロードすると自動で実行されます。
-# Actions タブ →「医薬品マスターを作成」→「Run workflow」から、ダウンロードURLを指定して実行することもできます。
+# 厚生労働省の「薬価基準収載品目リスト」と「医療用医薬品供給状況」を自動で取得して
+# master.json（薬品マスター）と supply.json（供給状況）を作ります。
+#  - 平日の12時台と18時台（日本時間）に自動実行
+#  - master-src/ にファイル（HOTコードマスター、GS1対応表など）を置いたときにも実行
+#  - Actions タブ →「医薬品マスターを作成」→「Run workflow」で手動実行（URLの追加指定も可）
 on:
+  schedule:
+    - cron: '17 3 * * 1-5'
+    - cron: '17 9 * * 1-5'
   push:
     paths:
       - 'master-src/**'
+      - 'tools/build_master.py'
   workflow_dispatch:
     inputs:
       urls:
-        description: 'マスターファイルのURL（複数はスペース区切り。空なら master-src/ のみ）'
+        description: '追加で取り込むファイルのURL（複数はスペース区切り。空でよい）'
         required: false
         default: ''
 
@@ -29,18 +36,19 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install pandas openpyxl xlrd
-      - name: master.json を作成
+      - name: 厚労省から取得して変換
         env:
           URLS: ${{ github.event.inputs.urls }}
-        run: python tools/build_master.py $URLS
+        run: python tools/build_master.py --auto $URLS
       - name: 変更をコミット
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          git add master.json master-meta.json
+          for f in master.json master-meta.json supply.json; do [ -f "$f" ] && git add "$f"; done
           if git diff --cached --quiet; then
-            echo "マスターに変更はありません"
+            echo "変更はありません"
           else
-            git commit -m "医薬品マスターを更新 ($(date +%Y-%m-%d))"
+            git commit -m "医薬品マスター・供給状況を更新 ($(TZ=Asia/Tokyo date +%Y-%m-%d))"
+            git pull --rebase
             git push
           fi

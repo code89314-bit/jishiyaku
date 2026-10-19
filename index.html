@@ -1156,6 +1156,36 @@ async function importMasterFiles(files, onMsg) {
   const stored = await idbSet('master', { items: Master.items, meta: Master.meta });
   return { rowsDone, linked, unlinked: pending.length - linked, stored };
 }
+/* ---- 医療用医薬品供給状況（厚労省、毎営業日更新）: YJコード → [出荷対応, 出荷量, 更新日, 理由, 解除見込み] ---- */
+const Supply = { items: {}, meta: null, codes: { 1: '通常出荷', 2: '限定出荷（自社の事情）', 3: '限定出荷（他社品の影響）', 4: '限定出荷（その他）', 5: '供給停止' } };
+const QTY = { 'A+': '出荷量増加', A: '出荷量通常', B: '出荷量減少', C: '出荷停止', D: '薬価削除予定' };
+function supplyOfYJ(yj) {
+  const r = yj && Supply.items[yj];
+  if (!r) return null;
+  return { code: r[0], label: Supply.codes[r[0]] || '', qty: r[1], qtyLabel: QTY[r[1]] || '', date: r[2] || '', reason: r[3] || '', expect: r[4] || '' };
+}
+const supplyOf = d => supplyOfYJ(d?.yj || d?.y);
+function supplyTag(s, long) {
+  if (!s || !s.code) return '';
+  const cls = s.code === 1 ? '' : ' warn';
+  const short = s.code === 1 ? '通常出荷' : s.code === 5 ? '供給停止' : '限定出荷';
+  return `<span class="tag${cls}">${esc(long ? s.label : short)}${s.qty ? '・' + esc(s.qty) : ''}</span>`;
+}
+async function pullSupply(meta) {
+  const sv = meta?.supply?.version;
+  if (!sv || Supply.meta?.version === sv) return false;
+  try {
+    const r = await fetch('supply.json?v=' + encodeURIComponent(sv), { cache: 'no-store' });
+    if (!r.ok) return false;
+    const data = await r.json();
+    if (!data?.items) return false;
+    Supply.items = data.items; Supply.meta = data.meta || meta.supply;
+    if (data.codes) Supply.codes = data.codes;
+    await idbSet('supply', { items: Supply.items, meta: Supply.meta, codes: Supply.codes });
+    return true;
+  } catch (e) { return false; }
+}
+
 /* ---- サーバー（GitHub Pages）からマスターを取得 ----
    master-meta.json の version が手元と違うときだけ master.json を取りに行く */
 let pulling = false;
@@ -1176,8 +1206,10 @@ async function pullMaster(manual) {
       if (manual) masterMsg('サーバーのマスターを確認できませんでした（オフライン、またはサーバーにマスターがありません）。');
       return;
     }
+    const supplyNew = await pullSupply(meta);
     if (Master.meta?.server === meta.version) {
-      if (manual) masterMsg(`最新です（${meta.date} 作成・${Number(meta.count).toLocaleString()}品目）。`);
+      if (manual) masterMsg(`最新です（マスター ${meta.date}・${Number(meta.count).toLocaleString()}品目／供給状況 ${Supply.meta?.asof || '未取得'}）。`);
+      else if (supplyNew) refresh();
       return;
     }
     masterMsg(`サーバーから最新のマスターを取得中…（${Number(meta.count).toLocaleString()}品目）`);
@@ -1327,7 +1359,7 @@ function rowHtml(d) {
     <div class="info">
       <div class="dname">${esc(displayName(d))}</div>
       ${info ? `<div class="sub">${esc(info)}</div>` : ''}
-      ${(packs.length || (Master.ready && !matched(d))) ? `<div class="tags">${Master.ready && !matched(d) ? '<span class="tag warn">マスター未照合</span>' : ''}${packs.map(p => `<span class="tag">${esc(p.name)} ${esc(packSummary(p) || '包数未入力')}</span>`).join('')}</div>` : ''}
+      ${(packs.length || (Master.ready && !matched(d)) || (supplyOf(d)?.code > 1)) ? `<div class="tags">${Master.ready && !matched(d) ? '<span class="tag warn">マスター未照合</span>' : ''}${supplyOf(d)?.code > 1 ? supplyTag(supplyOf(d)) : ''}${packs.map(p => `<span class="tag">${esc(p.name)} ${esc(packSummary(p) || '包数未入力')}</span>`).join('')}</div>` : ''}
     </div>
     <div class="qty" data-qty="${d.id}">${!t ? '<div class="none">—</div>'
       : isExt(d) ? `<div class="num" style="font-size:15px">${esc(extText(d))}</div><div class="bd">外用</div>`
@@ -1678,11 +1710,12 @@ const PANELS = {
             ? `<p class="okline">${Master.items.length.toLocaleString()}品目（GS1コード ${Master.gs1.size.toLocaleString()}件）</p>
                <p class="muted">取り込み日 ${esc(Master.meta?.date || '')}／${esc((Master.meta?.files || []).join('、'))}</p>`
             : '<p class="warnline">未取り込み</p>'}
+          ${Supply.meta ? `<p class="muted">供給状況：${esc(Supply.meta.asof || '')}／${Number(Supply.meta.count || 0).toLocaleString()}品目${Supply.meta.counts ? '（限定出荷 ' + ((Supply.meta.counts['限定出荷（自社の事情）'] || 0) + (Supply.meta.counts['限定出荷（他社品の影響）'] || 0) + (Supply.meta.counts['限定出荷（その他）'] || 0)).toLocaleString() + '・供給停止 ' + (Supply.meta.counts['供給停止'] || 0).toLocaleString() + '）' : ''}</p>` : ''}
           <p class="muted" id="masterMsg" role="status">${esc(p.msg || '')}</p>
         </div>
         ${window.JISHIYAKU_SITE ? `<div class="block">
           <h3>サーバーから取得</h3>
-          <p class="muted">GitHubの master-src フォルダにマスターのファイルを置くと、自動で変換されます。アプリは開くたびに新しい版を確認し、あれば取得します。</p>
+          <p class="muted">厚生労働省の「薬価基準収載品目リスト」と「医療用医薬品供給状況」を、サーバーが平日に自動で取得しています。アプリは開くたびに新しい版を確認し、あれば取得します。GitHubの master-src フォルダにHOTコードマスターやGS1の表を置くと、それも合わせて取り込みます。</p>
           <button class="btn primary" data-act="pullMaster">最新のマスターを取得</button>
         </div>` : ''}
         <div class="block filepick">
@@ -1800,13 +1833,21 @@ const PANELS = {
 function candList(list, act) {
   if (!list || !list.length) return '<p class="muted">候補が見つかりません。名前の一部（例: アムロジピン 5）で検索してください。</p>';
   return `<div class="cands">${list.map((c, i) => `<button class="cand" data-act="${act}" data-i="${i}">
-    <span class="cn">${esc(c.n)}</span><span class="cs">YJ ${esc(c.y || 'なし')} · 一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`;
+    <span class="cn">${esc(c.n)}</span><span class="cs">YJ ${esc(c.y || 'なし')} · 一致度 ${Math.round(c.sim * 100)}%</span>
+    ${supplyOfYJ(c.y)?.code > 1 ? `<span class="tags">${supplyTag(supplyOfYJ(c.y), true)}</span>` : ''}</button>`).join('')}</div>`;
 }
 const gs1Field = (act) => `
   <div class="field"><label for="gs1In">GS1コードで特定（バーコードリーダー・番号入力）</label>
     <div class="other"><input id="gs1In" inputmode="numeric" placeholder="(01)14987…" autocomplete="off" autocorrect="off" spellcheck="false">
     <button class="btn" data-act="${act}">特定</button></div>
     <p class="muted" id="gs1Msg" role="status"></p></div>`;
+
+function supplyBlock(s) {
+  if (!Supply.meta) return '';
+  if (!s) return `<p class="muted">供給状況：一覧に該当なし（${esc(Supply.meta.asof || '')}）</p>`;
+  return `<div class="tags">${supplyTag(s, true)}</div>
+    <p class="muted">${s.qty ? esc(s.qty + '：' + s.qtyLabel) + '　' : ''}${s.date ? esc(s.date) + ' 更新' : ''}${s.reason ? '<br>理由：' + esc(s.reason) : ''}${s.expect ? '<br>解除見込み：' + esc(s.expect) : ''}<br>厚労省 医療用医薬品供給状況（${esc(Supply.meta.asof || '')}）</p>`;
+}
 
 function matchBlock(d) {
   if (!Master.ready) return `<div class="block"><h3>医薬品マスター照合</h3>
@@ -1817,6 +1858,7 @@ function matchBlock(d) {
     <h3>医薬品マスター照合</h3>
     ${matched(d)
       ? `<p class="okline">✓ 照合済　YJ <span class="num">${esc(d.yj || 'なし')}</span></p>
+         ${supplyBlock(supplyOf(d))}
          ${d.rawName && d.rawName !== d.name ? `<p class="muted">読み取り名：${esc(d.rawName)}</p>` : ''}
          ${d.gs1 ? `<p class="muted">GS1：<span class="num">${esc(d.gs1)}</span></p>` : ''}
          <button class="btn" data-act="unmatch">照合を外す</button>`
@@ -2195,7 +2237,10 @@ idbGet('master').then(m => {
     Master.items = m.items; Master.meta = m.meta; buildIndex();
     renderMain(); if (ui.panel) renderPanel();
   }
-  pullMaster(false);   // サーバーに新しいマスターがあれば取得（GitHub Pages版のみ）
+  return idbGet('supply');
+}).then(s => {
+  if (s && s.items) { Supply.items = s.items; Supply.meta = s.meta; if (s.codes) Supply.codes = s.codes; renderMain(); if (ui.panel) renderPanel(); }
+  pullMaster(false);   // サーバーに新しいマスター・供給状況があれば取得（GitHub Pages版のみ）
 });
 })();
 </script>

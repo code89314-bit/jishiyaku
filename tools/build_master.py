@@ -189,37 +189,208 @@ def build(sources):
     return items, rows_read, linked, len(pending) - linked
 
 
+# ---------- 厚生労働省のページから最新ファイルを探す ----------
+MHLW = 'https://www.mhlw.go.jp'
+PRICE_PAGE = MHLW + '/topics/{y}/04/tp{y}0401-01.html'       # 薬価基準収載品目リスト（年度ごとのページ）
+SUPPLY_PAGE = MHLW + '/stf/seisakunitsuite/bunya/kenkou_iryou/iryou/kouhatu-iyaku/04_00003.html'  # 医療用医薬品供給状況
+JST = timezone(timedelta(hours=9))
+
+
+def http_get(url):
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (jishiyaku master builder)'})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        return r.read()
+
+
+def html_text(url):
+    return decode(http_get(url))
+
+
+def discover_price_list():
+    """最新の「薬価基準収載品目リスト」ページを辿り、内用・注射・外用・歯科のExcelのURLを返す"""
+    from urllib.parse import urljoin
+    now = datetime.now(JST)
+    page_url, html = None, None
+    for y in (now.year, now.year - 1, now.year - 2):
+        try:
+            u = PRICE_PAGE.format(y=y)
+            html, page_url = html_text(u), u
+            break
+        except Exception as e:
+            print('  なし:', PRICE_PAGE.format(y=y), e)
+    if not html:
+        raise RuntimeError('薬価基準収載品目リストのページが見つかりません')
+    # 「最新の情報はこちら」のように新しいページへのリンクがあれば辿る
+    for _ in range(5):
+        cur = re.search(r'tp(\d{8})-01\.html', page_url).group(1)
+        newer = sorted({(m.group(2), urljoin(page_url, m.group(1))) for m in re.finditer(r'href="([^"]*/topics/\d{4}/\d{2}/tp(\d{8})-01\.html)"', html) if m.group(2) > cur})
+        if not newer:
+            break
+        page_url = newer[-1][1]
+        html = html_text(page_url)
+    title = re.search(r'<title>(.*?)</title>', html, re.S)
+    print('  薬価基準収載品目リスト:', page_url, title.group(1).strip() if title else '')
+    best = {}
+    for m in re.finditer(r'href="([^"]*tp(\d{8})-01_0([1-4])\.xlsx)"', html):
+        kind, date = m.group(3), m.group(2)
+        if kind not in best or date > best[kind][0]:
+            best[kind] = (date, urljoin(page_url, m.group(1)))
+    if not best:
+        raise RuntimeError('Excelのリンクが見つかりません')
+    return [best[k][1] for k in sorted(best)], (title.group(1).strip() if title else page_url)
+
+
+def discover_supply():
+    """「医療用医薬品供給状況」ページから最新のExcelのURLと「◯月◯日現在」の表記を返す"""
+    from urllib.parse import urljoin
+    html = html_text(SUPPLY_PAGE)
+    links = []
+    for m in re.finditer(r'<a[^>]+href="([^"]+\.xlsx)"[^>]*>(.*?)</a>', html, re.S):
+        text = re.sub(r'<[^>]+>|\s', '', m.group(2))
+        if '供給状況' in text or 'kyoukyu' in m.group(1):
+            links.append((urljoin(SUPPLY_PAGE, m.group(1)), text))
+    if not links:
+        raise RuntimeError('供給状況のExcelのリンクが見つかりません')
+    print('  医療用医薬品供給状況:', links[0][0], links[0][1])
+    return links[0]
+
+
+# ---------- 供給状況 ----------
+SHIP = {1: '通常出荷', 2: '限定出荷（自社の事情）', 3: '限定出荷（他社品の影響）', 4: '限定出荷（その他）', 5: '供給停止'}
+
+
+def ship_code(t):
+    t = re.sub(r'\s', '', t)
+    if not t:
+        return 0
+    if '供給停止' in t:
+        return 5
+    if '限定' in t:
+        return 2 if '自社' in t else 3 if '他社' in t else 4
+    if '通常' in t:
+        return 1
+    return 0
+
+
+def qty_code(t):
+    t = re.sub(r'\s', '', t)
+    m = re.match(r'^[①-⑤]?([A-DＡ-Ｄ])(プラス|\+|＋)?', t)
+    if not m:
+        return ''
+    return unicodedata.normalize('NFKC', m.group(1)) + ('+' if m.group(2) else '')
+
+
+def parse_supply(tables):
+    out = {}
+    for tname, rows in tables:
+        hdr = None
+        for r, row in enumerate(rows[:30]):
+            h = [re.sub(r'\s', '', c) for c in row]
+            if any('YJ' in c for c in h) and any('出荷' in c for c in h):
+                hdr = r
+                break
+        if hdr is None:
+            continue
+        H = [re.sub(r'\s', '', c) for c in rows[hdr]]
+
+        def col(pred):
+            return next((i for i, c in enumerate(H) if pred(c)), -1)
+        yj = col(lambda c: 'YJ' in c)
+        ship = col(lambda c: '出荷対応' in c and not re.search(r'日|理由|見込', c))
+        qty = col(lambda c: '出荷量' in c and not re.search(r'日|理由|見込|改善', c))
+        upd = col(lambda c: '更新' in c and '日' in c)
+        reason = col(lambda c: '理由' in c)
+        expect = col(lambda c: '見込' in c)
+        print(f'  read: {tname}  yj={yj} 出荷対応={ship} 出荷量={qty} 更新日={upd} 理由={reason} 見込み={expect}')
+        for row in rows[hdr + 1:]:
+            g = lambda i: row[i] if 0 <= i < len(row) else ''
+            code = g(yj)
+            if not YJ_RE.fullmatch(code):
+                continue
+            s, q = ship_code(g(ship)), qty_code(g(qty))
+            if not s and not q:
+                continue
+            rec = [s, q, g(upd)[:10]]
+            r_, e_ = g(reason), g(expect)
+            if s and s != 1 and (r_ or e_):
+                rec += [r_[:80], e_[:40]]
+            out[code] = rec
+    return out
+
+
+def write_json(path, obj):
+    path.write_text(json.dumps(obj, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+
+
 def main():
+    args = [u for a in sys.argv[1:] for u in a.split()]
+    auto = '--auto' in args
+    urls = [a for a in args if a.startswith('http')]
+    meta_path = ROOT / 'master-meta.json'
+    meta = json.loads(meta_path.read_text(encoding='utf-8')) if meta_path.exists() else {}
+    jst_today = datetime.now(JST).strftime('%Y/%m/%d')
+    failed = []
+
+    # 1) 薬品マスター：master-src/ のファイル ＋ 指定URL ＋（--auto なら）厚労省の最新リスト
     sources = []
     for p in sorted(SRC.glob('*')):
         if p.is_file() and not p.name.startswith('.') and p.suffix.lower() in ('.xlsx', '.xlsm', '.xls', '.csv', '.txt', '.tsv', '.zip'):
             sources.append((p.name, p.read_bytes()))
-    for url in [u for a in sys.argv[1:] for u in a.split()]:
+    price_title = ''
+    if auto:
+        try:
+            price_urls, price_title = discover_price_list()
+            urls = price_urls + urls
+        except Exception as e:
+            failed.append(f'薬価基準収載品目リスト: {e}')
+    for url in urls:
         print('download:', url)
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            sources.append((url.rsplit('/', 1)[-1].split('?')[0] or 'download', r.read()))
-    if not sources:
-        print('master-src/ にファイルがありません')
+        try:
+            sources.append((url.rsplit('/', 1)[-1].split('?')[0] or 'download', http_get(url)))
+        except Exception as e:
+            failed.append(f'{url}: {e}')
+    if sources:
+        items, rows_read, linked, unlinked = build(sources)
+        if items:
+            items.sort(key=lambda it: (it.get('y') or 'ZZZ', it['n']))
+            version = hashlib.sha1(json.dumps(items, ensure_ascii=False).encode()).hexdigest()[:12]
+            if meta.get('version') != version:
+                meta.update(version=version, date=jst_today)
+            meta.update(count=len(items), gs1=sum(len(it.get('g', [])) for it in items),
+                        files=[n for n, _ in sources], source=price_title)
+            write_json(ROOT / 'master.json', {'meta': {k: meta[k] for k in ('version', 'date', 'count')}, 'items': items})
+            print(f'行 {rows_read:,} → 品目 {len(items):,}（GS1 {meta["gs1"]:,}件, 対応表 {linked:,}行を結合, 未結合 {unlinked:,}行） version={version}')
+        else:
+            failed.append('薬品を1件も読み取れませんでした')
+
+    # 2) 供給状況（--auto のとき）
+    if auto:
+        try:
+            url, label = discover_supply()
+            data = http_get(url)
+            supply = parse_supply(list(tables_from_bytes(url.rsplit('/', 1)[-1], data)))
+            if not supply:
+                raise RuntimeError('供給状況の表を読み取れませんでした（列名が変わった可能性があります）')
+            asof = re.search(r'[（(](.*?現在)[）)]', label)
+            sv = hashlib.sha1(json.dumps(supply, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
+            counts = {SHIP[k]: sum(1 for v in supply.values() if v[0] == k) for k in SHIP}
+            meta['supply'] = {'version': sv, 'asof': asof.group(1) if asof else label, 'count': len(supply), 'counts': counts}
+            write_json(ROOT / 'supply.json', {'meta': meta['supply'], 'codes': SHIP, 'items': supply})
+            print(f'供給状況 {len(supply):,}品目 ' + ' / '.join(f'{k}{v:,}' for k, v in counts.items()))
+        except Exception as e:
+            failed.append(f'供給状況: {e}')
+
+    if meta:
+        if failed:
+            meta['errors'] = failed
+        else:
+            meta.pop('errors', None)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    for f in failed:
+        print('::warning::' + f)
+    if not meta.get('version') and not meta.get('supply'):
+        print('作成できるデータがありませんでした')
         return 1
-    items, rows_read, linked, unlinked = build(sources)
-    if not items:
-        print('薬品を1件も読み取れませんでした')
-        return 1
-    items.sort(key=lambda it: (it.get('y') or 'ZZZ', it['n']))
-    body = json.dumps({'items': items}, ensure_ascii=False, separators=(',', ':'))
-    version = hashlib.sha1(body.encode()).hexdigest()[:12]
-    jst = timezone(timedelta(hours=9))
-    meta = {
-        'version': version,
-        'date': datetime.now(jst).strftime('%Y/%m/%d'),
-        'count': len(items),
-        'gs1': sum(len(it.get('g', [])) for it in items),
-        'files': [n for n, _ in sources],
-    }
-    (ROOT / 'master.json').write_text(json.dumps({'meta': meta, 'items': items}, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
-    (ROOT / 'master-meta.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
-    print(f'行 {rows_read:,} → 品目 {len(items):,}（GS1 {meta["gs1"]:,}件, 対応表 {linked:,}行を結合, 未結合 {unlinked:,}行） version={version}')
     return 0
 
 
