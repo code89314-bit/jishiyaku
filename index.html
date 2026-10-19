@@ -807,8 +807,8 @@ function normalize(s) {
 }
 function isDrugLine(s) {
   if (!FORM.test(s)) return false;
-  const m = s.match(USAGE);
-  const head = m ? s.slice(0, m.index) : s;
+  const st = structUsage(s).startStrict;
+  const head = st >= 0 ? fixUsageOcr(s).slice(0, st) : s;
   const stripped = head.replace(/(カプセル|シロップ|ドライシロップ|テープ|パップ|クリーム|ローション|ゲル|エアゾール)/g, '');
   return /[ァ-ヴー]{3,}/.test(stripped)
     || /\d+(\.\d+)?\s*(mg|μg|%|mL|単位)/.test(head)
@@ -831,9 +831,10 @@ function cleanName(s) {
           .replace(/【(内服|外用|頓服|内用|屯用)[^】]*】/g, '').trim();
 }
 function splitDrugLine(line) {
-  let head = line, usage = '';
-  const m = line.match(USAGE);
-  if (m) { head = line.slice(0, m.index); usage = line.slice(m.index).trim(); }
+  const fixed = fixUsageOcr(line);
+  const st = structUsage(line).startStrict;
+  let head = fixed, usage = '';
+  if (st >= 0) { head = fixed.slice(0, st); usage = fixed.slice(st).trim(); }
   head = head.trim();
   let dose = '';
   const d = head.match(DOSE_END);
@@ -843,7 +844,7 @@ function splitDrugLine(line) {
 }
 function parse(text) {
   const clinics = [];
-  let current = -1, waiting = [], lastGroup = [], lastDrug = null, prevUsage = false;
+  let current = -1, waiting = [], lastGroup = [], lastDrug = null, prevUsage = false, prevWasDrug = false;
   const ci = () => {
     if (current < 0) { clinics.push({ id: uid(), name: '医療機関不明', drugs: [] }); current = clinics.length - 1; }
     return current;
@@ -856,33 +857,44 @@ function parse(text) {
     if (cn) {
       const i = clinics.findIndex(c => c.name === cn);
       if (i >= 0) current = i; else { clinics.push({ id: uid(), name: cn, drugs: [] }); current = clinics.length - 1; }
-      waiting = []; lastDrug = null; prevUsage = false;
+      waiting = []; lastDrug = null; prevUsage = false; prevWasDrug = false;
       continue;
     }
-    if (NOISE.test(line) || PHARM.test(line)) { prevUsage = false; continue; }
+    if (NOISE.test(line) || PHARM.test(line)) { prevUsage = false; prevWasDrug = false; continue; }
 
     if (isDrugLine(line)) {
       const p = splitDrugLine(line);
       if (!p.name) continue;
+      // 2行目の処方箋記載名（【般】〜など）は直前の薬に紐づける
+      const prev = lastDrug && clinics[lastDrug[0]].drugs[lastDrug[1]];
+      if (prevWasDrug && prev && !prev.rxName && isRxNameLine(p.name, prev)) {
+        prev.rxName = p.name.replace(/^[(（【\[〔]?\s*(処方|Rp|変更前)\s*[:：)）\]】〕]?\s*/, '');
+        if (!prev.dose && p.dose) prev.dose = p.dose;
+        if (p.usage) { prev.usage = prev.usage ? prev.usage + ' ' + p.usage : p.usage; waiting = []; lastGroup = [lastDrug]; prevUsage = true; prevWasDrug = false; }
+        continue;
+      }
       const c = ci();
       clinics[c].drugs.push(newDrug(p.name, p.dose, p.usage));
       const ref = [c, clinics[c].drugs.length - 1];
       lastDrug = ref;
-      if (p.usage) { waiting = []; lastGroup = [ref]; prevUsage = true; }
-      else { waiting.push(ref); prevUsage = false; }
+      if (p.usage) { waiting = []; lastGroup = [ref]; prevUsage = true; prevWasDrug = false; }
+      else { waiting.push(ref); prevUsage = false; prevWasDrug = true; }
       continue;
     }
 
-    if (USAGE.test(line)) {
+    const su = structUsage(line);
+    if (su.found && (su.times.length || su.perDay || su.days || su.prn.length || su.prnFlag || su.ext.length || su.freq || su.meal)) {
+      prevWasDrug = false;
       let targets;
       if (prevUsage) targets = lastGroup;
       else if (waiting.length) targets = waiting;
       else if (lastDrug) targets = [lastDrug];
       else continue;
-      const pd = line.match(PER_DOSE);
+      const pd = su.text.match(PER_DOSE);
+      const utext = su.text.slice(Math.max(0, su.start)).trim();
       for (const [c, d] of targets) {
         const dr = clinics[c].drugs[d];
-        dr.usage = dr.usage ? dr.usage + ' ' + line : line;
+        dr.usage = dr.usage ? dr.usage + ' ' + utext : utext;
         if (!dr.dose && pd) dr.dose = pd[0].trim();
       }
       lastGroup = targets; waiting = []; prevUsage = true;
@@ -893,9 +905,180 @@ function parse(text) {
       const dr = clinics[lastDrug[0]].drugs[lastDrug[1]];
       if (!dr.dose) { dr.dose = line; continue; }
     }
-    prevUsage = false;
+    prevUsage = false; prevWasDrug = false;
   }
   return clinics.filter(c => c.drugs.length);
+}
+
+/* ================= 用法の構造化 =================
+   行のどこにあっても、用法の語彙（あいまい一致）と数字のパターン（正規表現）を拾い、
+   { 1日回数, 時点, 食事との関係, 1回量, 日数, 頻度, 頓用条件, 外用の使い方 } に組み立てる。
+   回数と時点を突き合わせ、矛盾や読み残しは flags に入れて確認を促す。 */
+const T_ORDER = ['起床時', '朝', '昼', '夕', '就寝前'];
+const MEAL_RANK = { '食直前': 0, '食前': 1, '食間': 2, '食直後': 3, '食後': 4 };
+const USAGE_VOCAB = (() => {
+  const v = [];
+  const meals = ['食直前', '食直後', '食前', '食後', '食間'];
+  for (const m of meals) {
+    v.push(['毎' + m, { t: ['朝', '昼', '夕'], m }]);
+    v.push(['朝昼夕' + m, { t: ['朝', '昼', '夕'], m }]);
+    for (const combo of [['朝', '夕'], ['朝', '昼'], ['昼', '夕']]) v.push([combo.join('') + m, { t: combo, m }]);
+    for (const t of ['朝', '昼', '夕']) v.push([t + m, { t: [t], m }]);
+  }
+  v.push(['起床時', { t: ['起床時'] }], ['就寝前', { t: ['就寝前'] }], ['寝る前', { t: ['就寝前'] }], ['眠前', { t: ['就寝前'] }], ['就寝時', { t: ['就寝前'] }]);
+  for (const m of meals) v.push([m, { m }]);
+  const prn = ['疼痛時', '痛い時', '痛む時', '発熱時', '熱がある時', '不眠時', '眠れない時', '便秘時', '嘔気時', '吐き気時', '悪心時', '発作時', '頭痛時', '不安時', 'イライラ時', '咳がひどい時', '咳嗽時', 'かゆい時', '掻痒時', '下痢時', '胸痛時', '動悸時', 'めまい時', '必要時', '腹痛時', '息苦しい時'];
+  for (const p of prn) v.push([p, { prn: p }]);
+  v.push(['頓用', { prnFlag: 1 }], ['頓服', { prnFlag: 1 }]);
+  const ext = ['患部に塗布', '患部に貼付', '患部に塗擦', '両眼に点眼', '右眼に点眼', '左眼に点眼', '両耳に点耳', '両鼻に点鼻', '吸入', '肛門内に挿入', '膣内に挿入', '塗布', '貼付', '点眼', '点鼻', '点耳', '噴霧', 'うがい', '含嗽'];
+  for (const e of ext) v.push([e, { ext: e }]);
+  return v.sort((a, b) => b[0].length - a[0].length);   // 長い語を優先
+})();
+
+// 用法まわりでよくあるOCRの誤読を直す
+function fixUsageOcr(s) {
+  return normalize(s)
+    .replace(/(\d)\s*[囗口ロ□]/g, '$1回')
+    .replace(/[l|I](?=\s*日|\s*回)/g, '1').replace(/(?<=日|回)\s*[l|I]/g, '1')
+    .replace(/曰/g, '日')
+    .replace(/食\s*[俊復後彼]/g, '食後').replace(/食\s*[刖削]/g, '食前')
+    .replace(/(?<=\d)\s*[O○〇]/g, '0')
+    .replace(/寝る\s*目[リ|]/g, '寝る前');
+}
+
+function findVocab(s) {
+  // 完全一致 → 1文字違いまで（3文字以上の語）の順に、重ならないように拾う
+  const hits = [], used = new Uint8Array(s.length);
+  const free = (i, L) => { for (let k = i; k < i + L; k++) if (used[k]) return false; return true; };
+  const take = (i, L, term, val, dist) => { for (let k = i; k < i + L; k++) used[k] = 1; hits.push({ i, L, term, val, dist }); };
+  for (const [term, val] of USAGE_VOCAB) {
+    let from = 0, i;
+    while ((i = s.indexOf(term, from)) >= 0) { if (free(i, term.length)) take(i, term.length, term, val, 0); from = i + 1; }
+  }
+  for (const [term, val] of USAGE_VOCAB) {
+    if (term.length < 3) continue;
+    for (const L of [term.length, term.length - 1, term.length + 1]) {
+      for (let i = 0; i + L <= s.length; i++) {
+        if (!free(i, L)) continue;
+        const w = s.substr(i, L);
+        if (/\d/.test(w)) continue;
+        if (lev(w, term) <= 1) { take(i, L, term, val, 1); i += L - 1; }
+      }
+    }
+  }
+  return hits.sort((a, b) => a.i - b.i);
+}
+
+const NUM_PATTERNS = [
+  ['perDay', /1\s*日\s*(\d)\s*回/g], ['perDay', /分\s*(\d)(?!\d)/g],
+  ['perDose', new RegExp('1\\s*回\\s*(\\d+(?:\\.\\d+)?)\\s*(錠|カプセル|C|包|g|mL|ml|単位|滴|枚|吸入|噴霧|個|本|プッシュ)', 'g')],
+  ['days', /(\d+)\s*日\s*分/g], ['times', /(\d+)\s*回\s*分/g],
+  ['weekly', /週\s*(\d)\s*(回|日)/g], ['everyN', /(\d+)\s*日\s*(?:ごと|毎|おき)/g], ['alt', /隔日/g],
+  ['hourly', /(\d+)\s*時間\s*(?:毎|ごと|おき)/g], ['several', /1\s*日\s*数\s*回/g]
+];
+
+function structUsage(text) {
+  const s = fixUsageOcr(text || '');
+  const u = { raw: (text || '').trim(), text: s, perDay: 0, times: [], meal: '', perDose: '', days: 0, count: 0, freq: '', prn: [], prnFlag: false, ext: [], unequal: [], flags: [], start: -1, startStrict: -1, found: 0 };
+  const mark = (i, strict = true) => {
+    if (u.start < 0 || i < u.start) u.start = i;
+    if (strict && (u.startStrict < 0 || i < u.startStrict)) u.startStrict = i;
+    u.found++;
+  };
+  const spans = [];
+  for (const [k, re] of NUM_PATTERNS) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(s))) {
+      mark(m.index); spans.push([m.index, m[0].length]);
+      if (k === 'perDay' && !u.perDay) u.perDay = +m[1];
+      else if (k === 'perDose' && !u.perDose) u.perDose = m[1] + m[2];
+      else if (k === 'days') u.days = +m[1];
+      else if (k === 'times') u.count = +m[1];
+      else if (k === 'weekly') u.freq = `週${m[1]}回`;
+      else if (k === 'everyN') u.freq = `${m[1]}日ごと`;
+      else if (k === 'alt') u.freq = '隔日';
+      else if (k === 'hourly') u.freq = `${m[1]}時間ごと`;
+      else if (k === 'several') u.freq = '1日数回';
+    }
+  }
+  // 時点ごとに量が違う（朝2錠 夕1錠）
+  const uneq = /(朝|昼|夕|就寝前|寝る前|眠前)\s*(\d+(?:\.\d+)?)\s*(錠|単位|包|カプセル|C|mL|g)/g;
+  let m;
+  while ((m = uneq.exec(s))) { u.unequal.push((m[1].match(/寝|眠/) ? '就寝前' : m[1]) + m[2] + m[3]); mark(m.index); spans.push([m.index, m[0].length]); }
+  for (const h of findVocab(s)) {
+    if (spans.some(([i, L]) => h.i >= i && h.i < i + L)) continue;
+    mark(h.i, !h.dist && !(h.val.ext && !/患部|眼|耳|鼻|肛門|膣/.test(h.term)) && !(h.val.m && !h.val.t));
+    spans.push([h.i, h.L]);
+    if (h.dist) u.flags.push(`「${s.substr(h.i, h.L)}」を「${h.term}」と読みました`);
+    const v = h.val;
+    if (v.t) for (const t of v.t) if (!u.times.includes(t)) u.times.push(t);
+    if (v.m) { if (u.meal && u.meal !== v.m) u.flags.push(`食事との関係が複数（${u.meal}・${v.m}）`); else u.meal = v.m; }
+    if (v.prn && !u.prn.includes(v.prn)) u.prn.push(v.prn);
+    if (v.prnFlag) u.prnFlag = true;
+    if (v.ext && !u.ext.some(e => e.includes(v.ext))) u.ext.push(v.ext);
+  }
+  for (const x of u.unequal) { const t = x.match(/^(朝|昼|夕|就寝前)/)[1]; if (!u.times.includes(t)) u.times.push(t); }
+  u.times.sort((a, b) => T_ORDER.indexOf(a) - T_ORDER.indexOf(b));
+
+  // 読み残し（用法らしい文字が残っていれば確認を促す）
+  let rest = s.split('');
+  for (const [i, L] of spans) for (let k = i; k < i + L; k++) rest[k] = ' ';
+  rest = rest.join('').replace(/[\s、,。・:：()（）\[\]【】]+/g, ' ').replace(/\b\d+\b/g, '').trim();
+  if (u.found && /[一-龥ぁ-んァ-ヴ]{2,}/.test(rest)) u.flags.push(`未解釈：${rest.slice(0, 30)}`);
+
+  // 回数と時点の突き合わせ
+  const n = u.times.length;
+  if (!u.perDay && n && !u.prn.length && !u.prnFlag && !u.freq) u.perDay = n;
+  else if (u.perDay && n && u.perDay !== n && !u.freq) u.flags.push(`回数（1日${u.perDay}回）と時点（${n}か所）が合いません`);
+  if (u.times.some(t => ['朝', '昼', '夕'].includes(t)) && !u.meal && !u.unequal.length && !u.prn.length) u.flags.push('食前・食後が読み取れません');
+
+  u.kind = (u.prn.length || u.prnFlag) ? 'prn' : u.ext.length ? 'ext' : 'reg';
+  u.label = usageLabel(u);
+  const firstT = n ? T_ORDER.indexOf(u.times[0]) : 9;
+  u.sortKey = [u.kind === 'prn' ? 2 : u.found ? 0 : 1, u.perDay || 9, u.meal in MEAL_RANK ? MEAL_RANK[u.meal] : 5, firstT];
+  return u;
+}
+
+function timingText(u) {
+  const meal = u.times.filter(t => ['朝', '昼', '夕'].includes(t));
+  const parts = [];
+  if (u.times.includes('起床時')) parts.push('起床時');
+  if (meal.length) {
+    if (u.meal) parts.push(meal.length === 3 ? '毎' + u.meal : meal.join('') + u.meal);
+    else parts.push(meal.join('・'));
+  } else if (u.meal && !u.times.length) parts.push(u.meal);
+  if (u.times.includes('就寝前')) parts.push('就寝前');
+  return parts.join('・');
+}
+
+// レポート用の表記：「分2 朝夕食後」「週1回 起床時」「疼痛時 頓用」「分2 患部に塗布」
+function usageLabel(u) {
+  if (!u.found) return u.raw || '用法未記載';
+  if (u.kind === 'prn') return [u.prn.join('・') || '', '頓用', u.perDose ? `1回${u.perDose}` : ''].filter(Boolean).join(' ');
+  const tt = timingText(u);
+  const head = u.freq ? u.freq : (u.perDay ? `分${u.perDay}` : '');
+  let body = u.kind === 'ext' ? [tt, u.ext.join('・')].filter(Boolean).join(' ') : tt;
+  if (!body && u.perDose) body = `1回${u.perDose}`;   // 吸入薬など時点の書かれない用法
+  const uneq = u.unequal.length ? `（${u.unequal.join('・')}）` : '';
+  return [head, body].filter(Boolean).join(' ') + uneq || u.raw;
+}
+
+// 処方箋記載名の行（【般】〜／同成分・同規格の別名）か
+const strengthOf = s => ((s || '').normalize('NFKC').match(/\d+(?:\.\d+)?\s*(?:mg|μg|g|%|mL|単位)/g) || []).map(x => x.replace(/\s/g, '')).join('|');
+function isRxNameLine(line, prev) {
+  if (/^[(（【\[〔]?\s*(般|一般名|処方|Rp|変更前|先発)/.test(line) || /【般】|\[般\]|\(般\)|（般）|〔般〕/.test(line)) return true;
+  if (!prev) return false;
+  const a = strengthOf(line), b = strengthOf(prev.name);
+  if (!a || a !== b) return false;
+  if (Master.ready) {
+    const x = searchMaster(line, 1)[0], y = prev.yj ? Master.items.find(it => it.y === prev.yj) : null;
+    const ix = x && Master.items.find(it => it.n === x.n && it.y === x.y);
+    const yy = y || (searchMaster(prev.name, 1)[0] && Master.items.find(it => it.n === searchMaster(prev.name, 1)[0].n));
+    if (ix?.c && yy?.c && ix.c === yy.c) return true;
+  }
+  const ka = (line.match(/[ァ-ヴー]{4,}/) || [''])[0], kb = (prev.name.match(/[ァ-ヴー]{4,}/) || [''])[0];
+  return ka.length >= 4 && kb.length >= 4 && (ka.startsWith(kb.slice(0, 4)) || kb.startsWith(ka.slice(0, 4)));
 }
 
 function merge(incoming) {
@@ -1321,7 +1504,10 @@ const SAMPLE = `調剤日 令和8年10月1日
 
 /* ================= 鑑別レポート ================= */
 // 用法を「分N 朝食後」の形に整え、並び順のキーを作る
-function usageInfo(raw) {
+function usageInfo(raw, override) {
+  const su = structUsage(raw);
+  if (override) return { label: override, key: su.sortKey };
+  if (su.found) return { label: su.label, key: su.sortKey };
   const s = normalize(raw || '');
   const m = s.match(/1日\s*(\d+)\s*回/) || s.match(/分\s*(\d+)/);
   const n = m ? +m[1] : null;
@@ -1376,7 +1562,7 @@ function buildReport() {
     out.push('●' + c.name);
     const groups = new Map();
     for (const d of c.drugs) {
-      const u = usageInfo(d.usage);
+      const u = usageInfo(d.usage, (d.usageLabel || '').trim());
       // 外用は頓用（内服）よりさらに下。外用どうしは分の少ない順
       const ext = isExt(d);
       if (ext) u.key = [3, ...u.key];
@@ -1606,6 +1792,8 @@ const PANELS = {
                 : `<div class="rv-badge ng">マスター未照合（取り込み後、数量入力画面で候補から選べます）</div>`) : ''}
               <div class="rv-pair"><span>用量</span><input class="txt" data-rv="${ci}|${di}|dose" value="${esc(d.dose)}" placeholder="例: 1錠"></div>
               <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
+              ${d.rxName ? `<div class="rv-badge">処方名：${esc(d.rxName)}</div>` : ''}
+              ${usageBadge(d.usage)}
             </div>`).join('')}
           <button class="btn" data-act="rvAddDrug" data-i="${ci}">＋ 薬品を追加</button>
         </div>`).join('')
@@ -1688,7 +1876,10 @@ const PANELS = {
           <h3>薬品情報（修正できます）</h3>
           <div class="field"><label for="f-name">薬品名</label><input id="f-name" data-f="name" value="${esc(d.name)}"></div>
           <div class="field"><label for="f-dose">用量</label><input id="f-dose" data-f="dose" value="${esc(d.dose)}"></div>
-          <div class="field"><label for="f-usage">用法</label><textarea id="f-usage" data-f="usage" rows="2">${esc(d.usage)}</textarea></div>
+          ${d.rxName ? `<div class="field"><label for="f-rx">処方箋記載名</label><input id="f-rx" data-f="rxName" value="${esc(d.rxName)}"></div>` : ''}
+          <div class="field"><label for="f-usage">用法（読み取った原文）</label><textarea id="f-usage" data-f="usage" rows="2">${esc(d.usage)}</textarea></div>
+          <div id="usageBadge">${usageBadge(d.usage)}</div>
+          <div class="field"><label for="f-ulabel">レポートの用法を手で直す（空欄なら自動）</label><input id="f-ulabel" data-f="usageLabel" value="${esc(d.usageLabel || '')}" placeholder="例: 分2 朝夕食後"></div>
           <button class="btn" data-act="toggleExt">${isExt(d) ? '内服薬として扱う（シート・錠数で数える）' : '外用薬として扱う（本数で数える）'}</button>
           ${confirm
             ? `<div class="confirm"><p>この薬を一覧から削除しますか？</p><div class="inline"><button class="btn danger" data-act="delDrugYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
@@ -1901,6 +2092,13 @@ const PANELS = {
     };
   }
 };
+
+function usageBadge(text) {
+  const u = structUsage(text);
+  if (!u.found) return text ? `<div class="rv-badge ng">用法を読み取れません（レポートには原文のまま載ります）</div>` : '';
+  return `<div class="rv-badge ${u.flags.length ? 'ng' : 'ok'}">レポート：・・・・・${esc(u.label)}${u.days ? `（${u.days}日分）` : u.count ? `（${u.count}回分）` : ''}</div>`
+    + u.flags.map(f => `<div class="rv-badge ng">⚠ ${esc(f)}</div>`).join('');
+}
 
 function candList(list, act) {
   if (!list || !list.length) return '<p class="muted">候補が見つかりません。名前の一部（例: アムロジピン 5）で検索してください。</p>';
@@ -2268,6 +2466,7 @@ document.addEventListener('input', e => {
     if (r) {
       r.drug[t.dataset.f] = t.value;
       if (t.dataset.f === 'name') { r.drug.yj = ''; r.drug.matchSim = 0; r.drug.rawName = t.value; }
+      if (t.dataset.f === 'usage') { const b = $('#usageBadge'); if (b) b.innerHTML = usageBadge(t.value); }
       save(); renderMain();
     }
     return;
