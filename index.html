@@ -318,6 +318,8 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .cam .cam-msg { position: absolute; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom, 0px) + 120px); text-align: center; color: #fff; font-weight: 700; text-shadow: 0 1px 3px #000; }
 .cam .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
 .cam .flash.on { opacity: .6; transition: none; }
+.cam.gs1 .guide { top: 32%; bottom: auto; height: 22%; border-style: solid; border-color: #4dbda4; }
+.cam.gs1 .cam-msg { bottom: auto; top: calc(32% + 22% + 16px); padding: 0 16px; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 
@@ -675,9 +677,56 @@ function ocrImage(src) {
   return OCR.queue;
 }
 
+/* ---- GS1バーコード（PTPのGS1データバー）を無音カメラで読む ----
+   zxing-cpp（WASM）をページと一緒に置き、端末内で読み取る */
+const BC = { ready: null, timer: null, busy: false, onFound: null };
+function loadBarcode() {
+  if (!BC.ready) BC.ready = (async () => {
+    if (!window.ZXingWASM) await loadScript('zxing-reader.js');
+    ZXingWASM.prepareZXingModule({ overrides: { locateFile: (p, prefix) => p.endsWith('.wasm') ? assetURL('zxing_reader.wasm') : prefix + p }, fireImmediately: true });
+  })().catch(e => { BC.ready = null; throw e; });
+  return BC.ready;
+}
+const canScanGS1 = () => !!window.JISHIYAKU_SITE && !!navigator.mediaDevices?.getUserMedia;
+async function scanTick() {
+  const v = $('#camVideo');
+  if (BC.busy || !v.videoWidth || !Cam.stream) return;
+  BC.busy = true;
+  try {
+    // 枠（画面中央の帯）の部分だけを切り出して読む
+    const W = v.videoWidth, H = v.videoHeight;
+    const cw = Math.round(W * 0.9), ch = Math.round(H * 0.45);
+    const scale = Math.min(1, 1600 / cw);
+    const c = scanTick.c || (scanTick.c = document.createElement('canvas'));
+    c.width = Math.round(cw * scale); c.height = Math.round(ch * scale);
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(v, (W - cw) / 2, (H - ch) / 2, cw, ch, 0, 0, c.width, c.height);
+    const res = await ZXingWASM.readBarcodes(g.getImageData(0, 0, c.width, c.height), {
+      formats: ['DataBar', 'DataBarLimited', 'DataBarExpanded', 'EAN-13', 'Code128', 'DataMatrix', 'QRCode'],
+      tryHarder: true, maxNumberOfSymbols: 4
+    });
+    for (const r of res || []) {
+      const gtin = parseGS1(r.text);
+      if (!gtin) continue;
+      const it = lookupGS1(gtin);
+      try { navigator.vibrate?.(40); } catch (e) {}
+      if (it) { const f = BC.onFound; camClose(); f && f(it, gtin); return; }
+      $('#camMsg').textContent = `GS1 ${gtin} はマスターにありません。別の面を映すか、名前で探してください。`;
+    }
+  } catch (e) { console.error(e); }
+  finally { BC.busy = false; }
+}
+async function scanGS1(onFound) {
+  BC.onFound = onFound;
+  try { await loadBarcode(); } catch (e) { ui.note = 'バーコード読み取りの準備に失敗しました。通信できる状態で開き直してください。'; renderPanel(); return; }
+  if (!(await camOpen('gs1'))) return;
+  BC.timer = setInterval(scanTick, 200);
+}
+
 /* ---- 無音カメラ（ページがカメラを使える環境のみ） ---- */
-const Cam = { stream: null, torch: false, shots: 0 };
-async function camOpen() {
+const Cam = { stream: null, torch: false, shots: 0, mode: 'ocr' };
+async function camOpen(mode = 'ocr') {
+  Cam.mode = mode;
   const note = $('#camNote');
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
@@ -688,17 +737,25 @@ async function camOpen() {
   } catch (e) {
     ui.camBlocked = true;
     if (note) note.hidden = false;
-    return;
+    if (mode === 'gs1') { ui.note = 'カメラを使えませんでした。設定でカメラの使用を許可してください。'; renderPanel(); }
+    return false;
   }
   const v = $('#camVideo');
   v.srcObject = Cam.stream;
   try { await v.play(); } catch (e) {}
-  Cam.shots = 0; $('#camCount').textContent = '撮影 0枚';
+  const gs1 = mode === 'gs1';
+  $('#cam').classList.toggle('gs1', gs1);
+  $('.cam .shutter').hidden = gs1;
+  Cam.shots = 0; $('#camCount').textContent = gs1 ? 'GS1読み取り' : '撮影 0枚';
+  $('#camMsg').textContent = gs1 ? 'PTPシートのバーコードを枠の中に映してください' : '1ページずつ枠に合わせて撮影';
   $('#cam').hidden = false;
+  if (gs1) return true;
   ocrStatus(OCR.status);
   getWorker().catch(() => {});   // 撮影中にエンジンを準備しておく
+  return true;
 }
 function camClose() {
+  clearInterval(BC.timer); BC.timer = null;
   if (Cam.stream) Cam.stream.getTracks().forEach(t => t.stop());
   Cam.stream = null; Cam.torch = false;
   $('#cam').hidden = true;
@@ -896,8 +953,9 @@ function buildIndex() {
     }
   });
   Master.bigram = idx;
-  Master.gs1 = new Map(); Master.gs1Core = new Map(); Master.byHot = new Map();
+  Master.gs1 = new Map(); Master.gs1Core = new Map(); Master.byHot = new Map(); Master.pkg = new Map();
   Master.items.forEach((it, i) => {
+    if (it.gp) for (const g in it.gp) Master.pkg.set(g, it.gp[g]);
     for (const g of it.g || []) { Master.gs1.set(g, i); Master.gs1Core.set(g.slice(1, 13), i); }
     for (const h of it.h || []) { Master.byHot.set(h, i); if (h.length >= 9) Master.byHot.set(h.slice(0, 9), i); }
   });
@@ -996,6 +1054,13 @@ function parseGS1(raw) {
   if (/^\d{14}$/.test(d)) return d;
   if (/^\d{13}$/.test(d)) return '0' + d;
   return null;
+}
+// 調剤包装単位の名称（例「PTP 14錠」）から1シートの錠数を取り出す
+function sheetFromGS1(g) {
+  const label = (Master.pkg?.get(g) || '').normalize('NFKC');
+  const m = label.match(/(\d+)\s*(錠|カプセル|C|枚|包|個)/);
+  const n = m ? +m[1] : 0;
+  return n >= 2 && n <= 100 ? n : 0;
 }
 function lookupGS1(g) {
   if (!g) return null;
@@ -1684,6 +1749,12 @@ const PANELS = {
           <div class="sizes">${names.map(n => `<button class="seg${p.clinic === n ? ' on' : ''}" data-act="addClinic" data-v="${esc(n)}" style="padding:0 10px">${esc(n)}</button>`).join('')}</div>
         </div>
         ${Master.ready ? '' : `<div class="block"><p class="warnline">医薬品マスターが未取り込みです</p><p class="muted">GS1コードと名前検索を使うには、メニュー →「医薬品マスター」で取り込んでください。名前の手入力は今でもできます。</p></div>`}
+        ${canScanGS1() ? `<div class="block">
+          <h3>PTPシートのGS1で探す</h3>
+          <button class="btn primary" data-act="scanGs1Add" style="min-height:56px;font-size:17px">カメラで読む（無音）</button>
+          <p class="muted">PTPシートの端にある細長いバーコード（GS1データバー）を枠に映すと、自動で読み取って薬を特定します。</p>
+          ${ui.note ? `<p class="warnline" role="status">${esc(ui.note)}</p>` : ''}
+        </div>` : ''}
         <div class="block">
           <h3>薬品名で探す</h3>
           <button class="btn primary" data-act="voice" data-target="addSearch" style="min-height:56px;font-size:17px">音声で探す</button>
@@ -1863,6 +1934,7 @@ function matchBlock(d) {
          ${d.gs1 ? `<p class="muted">GS1：<span class="num">${esc(d.gs1)}</span></p>` : ''}
          <button class="btn" data-act="unmatch">照合を外す</button>`
       : `<p class="warnline">未照合です。下の候補から正しい薬を選んでください。</p>`}
+    ${canScanGS1() ? `<button class="btn primary" data-act="scanGs1Apply" style="min-height:52px">PTPのGS1をカメラで読む（無音）</button>` : ''}
     <div class="field"><label for="mSearch">名前で検索して修正（音声入力可）</label>
       <div class="other"><input id="mSearch" placeholder="例: アムロジピン 5ミリ" autocomplete="off" autocorrect="off" spellcheck="false">
       <button class="btn primary" data-act="voice" data-target="mSearch">音声で探す</button></div>
@@ -2044,6 +2116,19 @@ const actions = {
     save(); refresh();
   },
 
+  // GS1バーコード読み取り
+  scanGs1Apply: () => {
+    const id = ui.panel.id;
+    scanGS1((it, gtin) => {
+      const r = findDrug(id); if (!r) return;
+      applyMaster(r.drug, { n: it.n, y: it.y || '' }, 1, gtin);
+      const sz = sheetFromGS1(gtin); if (sz) r.drug.sheetSize = sz;
+      ui.note = `GS1で特定しました：${it.n}${sz ? `（1シート${sz}）` : ''}`;
+      save(); refresh();
+    });
+  },
+  scanGs1Add: () => { ui.note = ''; scanGS1((it, gtin) => addDrugFromMaster({ n: it.n, y: it.y || '' }, 1, gtin)); },
+
   // 音声入力：入力欄にフォーカスしてキーボードを開く（マイクはキーボードのボタン）
   voice: el => {
     const inp = document.getElementById(el.dataset.target);
@@ -2124,10 +2209,15 @@ function clinicFor(name) {
 function addDrugFromMaster(it, sim, gtin) {
   for (const c of state.clinics) {
     const d = c.drugs.find(x => (it.y && x.yj === it.y && x.name === it.n) || x.name === it.n);
-    if (d) { if (gtin && !d.gs1) d.gs1 = gtin; ui.note = `${displayName(d)} は一覧にあります（${c.name}）`; save(); openHeat(d.id); return; }
+    if (d) {
+      if (gtin && !d.gs1) d.gs1 = gtin;
+      const sz = gtin && sheetFromGS1(gtin); if (sz) d.sheetSize = sz;
+      ui.note = `${displayName(d)} は一覧にあります（${c.name}）${sz ? `。1シート${sz}に設定` : ''}`; save(); openHeat(d.id); return;
+    }
   }
   const d = newDrug(it.n);
   d.yj = it.y || ''; d.matchSim = sim; if (gtin) d.gs1 = gtin;
+  const sz = gtin && sheetFromGS1(gtin); if (sz) d.sheetSize = sz;
   clinicFor(ui.panel.clinic || OUTSIDE).drugs.push(d);
   save();
   openHeat(d.id);

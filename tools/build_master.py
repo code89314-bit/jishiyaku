@@ -124,6 +124,12 @@ def detect(rows):
 
 
 # ---------- 組み立て ----------
+def is_medhot(rows):
+    """医薬品コード登録システム（medhot.medd.jp）の全件ファイル：30列目が調剤包装単位コード(14桁)"""
+    sample = [r for r in rows[:50] if len(r) >= 34]
+    return len(sample) >= 3 and sum(1 for r in sample if re.fullmatch(r'\d{14}', r[29])) >= len(sample) * 0.6
+
+
 def build(sources):
     items, key_index, hot_index, pending = [], {}, {}, []
     rows_read = 0
@@ -132,8 +138,44 @@ def build(sources):
         if v and v not in lst:
             lst.append(v)
 
+    yj_index = {}
+
+    def item_for(name, yj):
+        k = (yj or 'N') + '|' + norm_key(name)
+        idx = key_index.get(k)
+        if idx is None and yj:
+            idx = yj_index.get(yj)
+        if idx is None:
+            idx = len(items)
+            items.append({'n': name, 'y': yj, 'g': [], 'h': []})
+            key_index[k] = idx
+        if yj and yj not in yj_index:
+            yj_index[yj] = idx
+        return idx
+
     for fname, data in sources:
         for tname, rows in tables_from_bytes(fname, data):
+            if is_medhot(rows):
+                n = 0
+                for row in rows:
+                    if len(row) < 34 or not re.fullmatch(r'\d{14}', row[29]):
+                        continue
+                    yj = row[8].upper() if YJ_RE.fullmatch(row[8].upper()) else ''
+                    if not row[3]:
+                        continue
+                    it = items[item_for(row[3], yj)]
+                    unit_code = row[29]
+                    add_unique(it['g'], unit_code)
+                    for v in (row[32], row[33]):
+                        if re.fullmatch(r'\d{14}', v):
+                            add_unique(it['g'], v)
+                    label = row[30] or ' '.join(x for x in (row[22], row[23] + row[24]) if x)
+                    if label:
+                        it.setdefault('gp', {})[unit_code] = label[:40]
+                    n += 1
+                    rows_read += 1
+                print(f'  read: {tname}（医薬品コード登録システム） {n:,}行')
+                continue
             col = detect(rows)
             if col['name'] < 0 and not (col['hot'] >= 0 and col['gs1']):
                 print(f'  skip: {tname}（列を判定できません）')
@@ -149,12 +191,7 @@ def build(sources):
                 hot = g(col['hot']) if is_hot(g(col['hot'])) else ''
                 rows_read += 1
                 if name and re.search(r'[ァ-ヴA-Za-z一-龥]', name):
-                    k = (yj or 'N') + '|' + norm_key(name)
-                    idx = key_index.get(k)
-                    if idx is None:
-                        idx = len(items)
-                        items.append({'n': name, 'y': yj, 'g': [], 'h': []})
-                        key_index[k] = idx
+                    idx = item_for(name, yj)
                     it = items[idx]
                     for v in gs:
                         add_unique(it['g'], v)
@@ -240,6 +277,20 @@ def discover_price_list():
     return [best[k][1] for k in sorted(best)], (title.group(1).strip() if title else page_url)
 
 
+MEDHOT_PAGE = 'https://medhot.medd.jp/view_download'
+
+
+def discover_medhot():
+    """医薬品コード登録システムの「調剤包装単位・販売包装単位・元梱包装単位コードファイル」(ZIP)のURL"""
+    from urllib.parse import urljoin
+    html = html_text(MEDHOT_PAGE)
+    found = sorted({(m.group(2), urljoin(MEDHOT_PAGE, m.group(1).split(';')[0])) for m in re.finditer(r'href="([^"]*A_(\d{8})_2\.zip[^"]*)"', html)})
+    if not found:
+        raise RuntimeError('GS1コードファイルのリンクが見つかりません')
+    print('  医薬品コード登録システム:', found[-1][1])
+    return found[-1][1]
+
+
 def discover_supply():
     """「医療用医薬品供給状況」ページから最新のExcelのURLと「◯月◯日現在」の表記を返す"""
     from urllib.parse import urljoin
@@ -280,6 +331,18 @@ def qty_code(t):
     return unicodedata.normalize('NFKC', m.group(1)) + ('+' if m.group(2) else '')
 
 
+def to_date(v):
+    """Excelの日付（シリアル値・日時文字列）を YYYY-MM-DD にする"""
+    v = (v or '').strip()
+    if re.fullmatch(r'\d{5}(\.\d+)?', v):
+        return (datetime(1899, 12, 30) + timedelta(days=int(float(v)))).strftime('%Y-%m-%d')
+    m = re.match(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', v)
+    return f'{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}' if m else v[:10]
+
+
+SKIPPED = []
+
+
 def parse_supply(tables):
     out = {}
     for tname, rows in tables:
@@ -304,13 +367,17 @@ def parse_supply(tables):
         print(f'  read: {tname}  yj={yj} 出荷対応={ship} 出荷量={qty} 更新日={upd} 理由={reason} 見込み={expect}')
         for row in rows[hdr + 1:]:
             g = lambda i: row[i] if 0 <= i < len(row) else ''
-            code = g(yj)
+            code = g(yj).upper()
             if not YJ_RE.fullmatch(code):
+                if code and len(SKIPPED) < 8:
+                    SKIPPED.append(code)
                 continue
             s, q = ship_code(g(ship)), qty_code(g(qty))
             if not s and not q:
+                if len(SKIPPED) < 8:
+                    SKIPPED.append(f'{code}:{g(ship)[:20]}/{g(qty)[:10]}')
                 continue
-            rec = [s, q, g(upd)[:10]]
+            rec = [s, q, to_date(g(upd))]
             r_, e_ = g(reason), g(expect)
             if s and s != 1 and (r_ or e_):
                 rec += [r_[:80], e_[:40]]
@@ -343,6 +410,10 @@ def main():
             urls = price_urls + urls
         except Exception as e:
             failed.append(f'薬価基準収載品目リスト: {e}')
+        try:
+            urls.append(discover_medhot())
+        except Exception as e:
+            failed.append(f'GS1コード（医薬品コード登録システム）: {e}')
     for url in urls:
         print('download:', url)
         try:
@@ -375,6 +446,8 @@ def main():
             sv = hashlib.sha1(json.dumps(supply, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
             counts = {SHIP[k]: sum(1 for v in supply.values() if v[0] == k) for k in SHIP}
             meta['supply'] = {'version': sv, 'asof': asof.group(1) if asof else label, 'count': len(supply), 'counts': counts}
+            if SKIPPED:
+                meta['supply']['skipped_samples'] = SKIPPED
             write_json(ROOT / 'supply.json', {'meta': meta['supply'], 'codes': SHIP, 'items': supply})
             print(f'供給状況 {len(supply):,}品目 ' + ' / '.join(f'{k}{v:,}' for k, v in counts.items()))
         except Exception as e:
