@@ -931,7 +931,7 @@ function deleteDrug(id) {
    items: { n: 販売名, y: YJコード, g: [GTIN-14...], h: [HOTコード...] }
    照合: 2文字組(bigram)で候補を絞り、レーベンシュタイン距離で類似度を出す */
 const Master = { items: [], norm: [], bigram: new Map(), gs1: new Map(), gs1Core: new Map(), byHot: new Map(), meta: null, ready: false };
-const YJ_RE = /^\d{7}[A-Z]\d{3}[0-9A-Z]$/;
+const YJ_RE = /^\d{4}[0-9A-Z]{3}[A-Z][0-9A-Z]{4}$/;   // 漢方・生薬は英字を含む（例: 510000CA1020）
 
 function normName(s) {
   return toKata((s || '').normalize('NFKC'))

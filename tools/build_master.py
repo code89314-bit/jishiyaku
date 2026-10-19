@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / 'master-src'
-YJ_RE = re.compile(r'^\d{7}[A-Z]\d{3}[0-9A-Z]$')
+YJ_RE = re.compile(r'^\d{4}[0-9A-Z]{3}[A-Z][0-9A-Z]{4}$')  # 漢方・生薬などは英字を含む（例: 510000CA1020）
 GTIN_RE = re.compile(r'^(?:\d?)(?:45|49)\d{11}$')
 FORM_RE = re.compile(r'(錠|カプセル|散|顆粒|液|軟膏|クリーム|テープ|注|mg|%|g)')
 KATA_RE = re.compile(r'[ァ-ヴ]{2,}')
@@ -281,14 +281,43 @@ MEDHOT_PAGE = 'https://medhot.medd.jp/view_download'
 
 
 def discover_medhot():
-    """医薬品コード登録システムの「調剤包装単位・販売包装単位・元梱包装単位コードファイル」(ZIP)のURL"""
+    """医薬品コード登録システムの「調剤包装単位・販売包装単位・元梱包装単位コードファイル」(ZIP)のURL。
+    ページ内のファイル名（A_YYYYMMDD_2）を探し、見つからなければ最近の月末日の名前を順に試す"""
     from urllib.parse import urljoin
-    html = html_text(MEDHOT_PAGE)
-    found = sorted({(m.group(2), urljoin(MEDHOT_PAGE, m.group(1).split(';')[0])) for m in re.finditer(r'href="([^"]*A_(\d{8})_2\.zip[^"]*)"', html)})
-    if not found:
-        raise RuntimeError('GS1コードファイルのリンクが見つかりません')
-    print('  医薬品コード登録システム:', found[-1][1])
-    return found[-1][1]
+    base = 'https://medhot.medd.jp/csv/'
+    names = []
+    try:
+        html = html_text(MEDHOT_PAGE)
+        names = sorted(set(re.findall(r'A_(\d{8})_2\.(?:zip|txt)', html)))
+        if not names:
+            print('  medhotページにファイル名がありません:', re.sub(r'\s+', ' ', html)[:300])
+    except Exception as e:
+        print('  medhotページを取得できません:', e)
+    if names:
+        url = base + f'A_{names[-1]}_2.zip'
+        print('  医薬品コード登録システム:', url)
+        return url
+    # 推測：直近の月末日（と15日）を新しい順に試す
+    today = datetime.now(JST).date()
+    cands = []
+    d = today
+    for _ in range(4):
+        first = d.replace(day=1)
+        last_prev = first - timedelta(days=1)
+        cands += [d.replace(day=15)] if d.day >= 15 else []
+        cands.append(last_prev)
+        d = last_prev
+    for c in sorted(set(cands), reverse=True):
+        url = base + f'A_{c:%Y%m%d}_2.zip'
+        try:
+            req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                if r.status == 200:
+                    print('  医薬品コード登録システム（推測）:', url)
+                    return url
+        except Exception:
+            pass
+    raise RuntimeError('GS1コードファイルが見つかりません')
 
 
 def discover_supply():
