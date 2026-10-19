@@ -1,0 +1,46 @@
+name: 医薬品マスターを作成
+
+# master-src/ にファイルをアップロードすると自動で実行されます。
+# Actions タブ →「医薬品マスターを作成」→「Run workflow」から、ダウンロードURLを指定して実行することもできます。
+on:
+  push:
+    paths:
+      - 'master-src/**'
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'マスターファイルのURL（複数はスペース区切り。空なら master-src/ のみ）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-master
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pandas openpyxl xlrd
+      - name: master.json を作成
+        env:
+          URLS: ${{ github.event.inputs.urls }}
+        run: python tools/build_master.py $URLS
+      - name: 変更をコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add master.json master-meta.json
+          if git diff --cached --quiet; then
+            echo "マスターに変更はありません"
+          else
+            git commit -m "医薬品マスターを更新 ($(date +%Y-%m-%d))"
+            git push
+          fi

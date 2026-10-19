@@ -9,6 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
+<script>window.JISHIYAKU_SITE = true;</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -1155,6 +1156,49 @@ async function importMasterFiles(files, onMsg) {
   const stored = await idbSet('master', { items: Master.items, meta: Master.meta });
   return { rowsDone, linked, unlinked: pending.length - linked, stored };
 }
+/* ---- サーバー（GitHub Pages）からマスターを取得 ----
+   master-meta.json の version が手元と違うときだけ master.json を取りに行く */
+let pulling = false;
+function masterMsg(t) {
+  if (ui.panel?.type === 'master') { ui.panel.msg = t; const m = $('#masterMsg'); if (m) m.textContent = t; }
+}
+async function pullMaster(manual) {
+  if (pulling || !/^https?:$/.test(location.protocol)) return;
+  pulling = true;
+  try {
+    let meta;
+    try {
+      const r = await fetch('master-meta.json', { cache: 'no-store' });
+      if (!r.ok) throw new Error(r.status);
+      meta = await r.json();
+      if (!meta?.version) throw new Error('no version');
+    } catch (e) {
+      if (manual) masterMsg('サーバーのマスターを確認できませんでした（オフライン、またはサーバーにマスターがありません）。');
+      return;
+    }
+    if (Master.meta?.server === meta.version) {
+      if (manual) masterMsg(`最新です（${meta.date} 作成・${Number(meta.count).toLocaleString()}品目）。`);
+      return;
+    }
+    masterMsg(`サーバーから最新のマスターを取得中…（${Number(meta.count).toLocaleString()}品目）`);
+    const r = await fetch('master.json?v=' + encodeURIComponent(meta.version), { cache: 'no-store' });
+    if (!r.ok) throw new Error('master.json ' + r.status);
+    const data = await r.json();
+    if (!Array.isArray(data.items) || !data.items.length) throw new Error('empty');
+    Master.items = data.items;
+    Master.meta = { date: meta.date, files: (meta.files || []).map(f => 'サーバー:' + f), server: meta.version };
+    buildIndex();
+    await idbSet('master', { items: Master.items, meta: Master.meta });
+    const n = rematchAll();
+    ui.note = `医薬品マスターを更新しました（${meta.date}・${Master.items.length.toLocaleString()}品目）` + (n ? `。${n}品目を照合しました` : '');
+    masterMsg(ui.note + '。');
+    refresh();
+  } catch (e) {
+    masterMsg('マスターの取得に失敗しました：' + (e?.message || e));
+  } finally { pulling = false; }
+}
+window.addEventListener('online', () => pullMaster(false));
+
 function rematchAll() {
   let n = 0;
   for (const c of state.clinics) for (const d of c.drugs) { const had = d.yj; autoMatch(d); if (!had && d.yj) n++; }
@@ -1636,8 +1680,13 @@ const PANELS = {
             : '<p class="warnline">未取り込み</p>'}
           <p class="muted" id="masterMsg" role="status">${esc(p.msg || '')}</p>
         </div>
+        ${window.JISHIYAKU_SITE ? `<div class="block">
+          <h3>サーバーから取得</h3>
+          <p class="muted">GitHubの master-src フォルダにマスターのファイルを置くと、自動で変換されます。アプリは開くたびに新しい版を確認し、あれば取得します。</p>
+          <button class="btn primary" data-act="pullMaster">最新のマスターを取得</button>
+        </div>` : ''}
         <div class="block filepick">
-          <h3>ファイルを取り込む（追加・上書き）</h3>
+          <h3>ファイルを取り込む（この端末だけに追加）</h3>
           <input type="file" id="masterFile" multiple accept=".csv,.txt,.tsv,.xlsx,.xls,text/csv,text/plain">
           <p class="muted">CSV・TXT・Excelに対応します。Shift_JISのファイルもそのまま読めます。列は見出しや中身から自動で判定します（販売名・YJコード・GS1／JANコード・HOTコード）。</p>
         </div>
@@ -1985,6 +2034,7 @@ const actions = {
 
   // マスター
   masterPanel: () => openPanel({ type: 'master' }),
+  pullMaster: () => { masterMsg('確認中…'); pullMaster(true); },
   rematch: () => { const n = rematchAll(); ui.panel.msg = `${n}品目を照合しました。残りは数量入力画面の候補から選んでください。`; refresh(); },
   clearMasterAsk: () => { ui.panel.confirm = 'clearMaster'; renderPanel(); },
   clearMasterYes: async () => {
@@ -2145,6 +2195,7 @@ idbGet('master').then(m => {
     Master.items = m.items; Master.meta = m.meta; buildIndex();
     renderMain(); if (ui.panel) renderPanel();
   }
+  pullMaster(false);   // サーバーに新しいマスターがあれば取得（GitHub Pages版のみ）
 });
 })();
 </script>
