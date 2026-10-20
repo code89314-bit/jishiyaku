@@ -617,16 +617,47 @@ async function prepareImage(src) {
   const g = c.getContext('2d', { willReadFrequently: true });
   g.drawImage(bmp, 0, 0, c.width, c.height);
   const im = g.getImageData(0, 0, c.width, c.height), d = im.data;
+  for (let i = 0; i < d.length; i += 4) d[i] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0;
+  // 照明むら（影）の補正：紙の明るさを推定して割る（縮小 → 最大値フィルタ → ぼかし → 拡大）
+  const bw = Math.max(8, Math.round(c.width / 24)), bh = Math.max(8, Math.round(c.height / 24));
+  let small = new Float32Array(bw * bh);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+    let mx = 0;
+    const x0 = Math.floor(x * c.width / bw), x1 = Math.floor((x + 1) * c.width / bw), y0 = Math.floor(y * c.height / bh), y1 = Math.floor((y + 1) * c.height / bh);
+    for (let yy = y0; yy < y1; yy += 2) for (let xx = x0; xx < x1; xx += 2) { const v = d[(yy * c.width + xx) * 4]; if (v > mx) mx = v; }
+    small[y * bw + x] = mx;
+  }
+  const filt = (src, fn) => {
+    const out = new Float32Array(bw * bh);
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+      const vals = [];
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = Math.min(bw - 1, Math.max(0, x + dx)), yy = Math.min(bh - 1, Math.max(0, y + dy));
+        vals.push(src[yy * bw + xx]);
+      }
+      out[y * bw + x] = fn(vals);
+    }
+    return out;
+  };
+  small = filt(small, v => Math.max(...v));
+  for (let k = 0; k < 2; k++) small = filt(small, v => v.reduce((a, b) => a + b, 0) / v.length);
   const hist = new Uint32Array(256);
-  for (let i = 0; i < d.length; i += 4) {
-    const y = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0;
-    d[i] = y; hist[y]++;
+  for (let y = 0; y < c.height; y++) {
+    const fy = Math.min(bh - 1.001, Math.max(0, (y + 0.5) * bh / c.height - 0.5)), iy = fy | 0, ty = fy - iy;
+    for (let x = 0; x < c.width; x++) {
+      const fx = Math.min(bw - 1.001, Math.max(0, (x + 0.5) * bw / c.width - 0.5)), ix = fx | 0, tx = fx - ix;
+      const a = small[iy * bw + ix], b = small[iy * bw + ix + 1], cc = small[(iy + 1) * bw + ix], dd = small[(iy + 1) * bw + ix + 1];
+      const bgv = (a * (1 - tx) + b * tx) * (1 - ty) + (cc * (1 - tx) + dd * tx) * ty;
+      const i = (y * c.width + x) * 4;
+      const v = Math.min(255, d[i] / Math.max(1, bgv) * 255) | 0;
+      d[i] = v; hist[v]++;
+    }
   }
   const total = d.length / 4;
   let lo = 0, hi = 255, acc = 0;
   for (; lo < 255; lo++) { acc += hist[lo]; if (acc > total * 0.01) break; }
   acc = 0;
-  for (; hi > 0; hi--) { acc += hist[hi]; if (acc > total * 0.01) break; }
+  for (; hi > 0; hi--) { acc += hist[hi]; if (acc > total * 0.4) break; }   // 紙の部分を白に寄せる
   const span = Math.max(1, hi - lo);
   for (let i = 0; i < d.length; i += 4) {
     const v = Math.max(0, Math.min(255, (d[i] - lo) * 255 / span));
@@ -662,10 +693,16 @@ function ocrImage(src) {
     try {
       const canvas = await prepareImage(src);
       const w = await getWorker();
-      const { data } = await w.recognize(canvas);
+      const { data } = await w.recognize(canvas, {}, { text: true, blocks: true });
       const text = cleanOcrText(data.text || '');
+      const lines = [];
+      for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || [])
+        lines.push({ bbox: l.bbox, words: (l.words || []).map(w => ({ text: w.text, bbox: w.bbox })) });
       OCR.pages++;
       appendScanText(text);
+      ui.scanPages = [...(ui.scanPages || []), { text, lines }];
+      try { window.__jishiyakuOcr = ui.scanPages; } catch (e) {}
+      ui.scanPagesText = ui.scanText;
       OCR.pending--;
       ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `${OCR.pages}ページ読み取りました。内容を確認して「解析する」を押してください。`, 1);
     } catch (err) {
@@ -782,7 +819,7 @@ async function camTorch() {
 /* ================= 解析（お薬手帳テキスト → 構造化） ================= */
 const CLINIC = /(病院|医院|クリニック|診療所|医療センター|内科|外科|眼科|皮膚科|耳鼻|歯科|整形|小児科|泌尿器|婦人科|心療|精神科)/;
 const PHARM = /(薬局|調剤|ファーマシー|ドラッグ)/;
-const NOISE = /(TEL|Tel|電話|FAX|〒|住所|薬剤師|お薬手帳|調剤日|処方日|交付日|患者|生年月日|保険|負担|領収|点数|注意|お大事|様$)/;
+const NOISE = /(TEL|Tel|電話|FAX|〒|住所|薬剤師|お薬手帳|調剤日|処方日|交付日|患者|生年月日|保険|負担|領収|点数|注意|お大事|様$|効能|効果[)）]|引換券|医師名|病棟|診療科|さんのお薬|処方されています|先生$)/;
 const FORM = /(錠|カプセル|散|顆粒|細粒|シロップ|DS|液|テープ|パップ|軟膏|クリーム|ローション|ゲル|点眼|点鼻|吸入|エアゾール|坐剤|坐薬|貼付剤|注|OD|mg|μg|mL)/;
 const USAGE_SRC = '(1日\\s*\\d+\\s*回|1回|分\\s*\\d|毎食|朝食|昼食|夕食|食前|食後|食間|就寝前|寝る前|眠前|起床時|頓用|頓服|\\d+\\s*日分|\\d+\\s*回分|時間毎|時間おき|疼痛時|発熱時|不眠時|便秘時|必要時|適宜|塗布|患部|貼付)';
 const UNIT_SRC = '(錠|カプセル|C|包|g|mL|ml|枚|本|個|滴|袋|T|瓶|キット|噴霧|吸入)';
@@ -800,7 +837,7 @@ try {
 } catch (e) { /* 古いiOSでは補正なし */ }
 
 function normalize(s) {
-  let t = s.replace(/[！-～]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+  let t = (s || '').normalize('NFKC').replace(/[！-～]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
            .replace(/　/g, ' ').replace(/µ/g, 'μ');
   for (const [re, r] of OCR_FIXES) t = t.replace(re, r);
   return t.replace(/[ \t]{3,}/g, '  ').trim();
@@ -816,6 +853,7 @@ function isDrugLine(s) {
     || /[A-Za-z]{2,}.*(錠|カプセル|散|顆粒)/.test(head);
 }
 function clinicName(s) {
+  if (/[。、!！?？]|(した|かった|ので|ます|でした|ません|にかか)/.test(s) || s.length > 30) return null;
   if (!CLINIC.test(s) || PHARM.test(s) || /(診療科|科名|紹介)/.test(s) || isDrugLine(s)) return null;
   let t = s.replace(/(処方)?(医療機関名?|病院名|医院名|処方元)\s*[:：]?/g, ' ');
   t = t.replace(/(令和|平成|R|H)?\s*\d{1,4}\s*[年\/.\-]\s*\d{1,2}\s*[月\/.\-]\s*\d{1,2}\s*日?/g, ' ');
@@ -943,7 +981,11 @@ function fixUsageOcr(s) {
     .replace(/曰/g, '日')
     .replace(/食\s*[俊復後彼]/g, '食後').replace(/食\s*[刖削]/g, '食前')
     .replace(/(?<=\d)\s*[O○〇]/g, '0')
-    .replace(/寝る\s*目[リ|]/g, '寝る前');
+    .replace(/寝る\s*目[リ|]/g, '寝る前')
+    .replace(/(^|[^\d])[iIl|\]](?=\s*日\s*\d\s*回)/g, '$11')
+    .replace(/(^|[^\d])(?=日\s*\d\s*回)/g, '$11')                  // 「1」が落ちた「日3回」
+    .replace(/タ(?=\s*食)/g, '夕').replace(/(?<=朝\s*[・,、]?\s*)タ/g, '夕').replace(/(?<=昼\s*[・,、]?\s*)タ/g, '夕')
+    .replace(/(朝|昼|夕)\s*[・,、]\s*(?=朝|昼|夕)/g, '$1');
 }
 
 function findVocab(s) {
@@ -979,13 +1021,16 @@ const NUM_PATTERNS = [
 
 function structUsage(text) {
   const s = fixUsageOcr(text || '');
+  let spans_site = null;
   const u = { raw: (text || '').trim(), text: s, perDay: 0, times: [], meal: '', perDose: '', days: 0, count: 0, freq: '', prn: [], prnFlag: false, ext: [], unequal: [], flags: [], start: -1, startStrict: -1, found: 0 };
+  const site = s.match(/部位[:：]\s*(\S+)/);
+  if (site) { u.site = site[1]; spans_site = [site.index, site[0].length]; }
   const mark = (i, strict = true) => {
     if (u.start < 0 || i < u.start) u.start = i;
     if (strict && (u.startStrict < 0 || i < u.startStrict)) u.startStrict = i;
     u.found++;
   };
-  const spans = [];
+  const spans = spans_site ? [spans_site] : [];
   for (const [k, re] of NUM_PATTERNS) {
     re.lastIndex = 0;
     let m;
@@ -1024,8 +1069,8 @@ function structUsage(text) {
   // 読み残し（用法らしい文字が残っていれば確認を促す）
   let rest = s.split('');
   for (const [i, L] of spans) for (let k = i; k < i + L; k++) rest[k] = ' ';
-  rest = rest.join('').replace(/[\s、,。・:：()（）\[\]【】]+/g, ' ').replace(/\b\d+\b/g, '').trim();
-  if (u.found && /[一-龥ぁ-んァ-ヴ]{2,}/.test(rest)) u.flags.push(`未解釈：${rest.slice(0, 30)}`);
+  rest = rest.join('').replace(/服用|使用|して下さい|してください|調剤|[×xX]/g, ' ').replace(/[\s、,。・:：()（）\[\]【】]+/g, ' ').replace(/\b\d+\b/g, '').trim();
+  if (u.found && /[一-龥ぁ-んァ-ヴ]/.test(rest.replace(/[ぁ-ん]{1}(?=\s|$)/g, ''))) u.flags.push(`未解釈：${rest.slice(0, 30)}`);
 
   // 回数と時点の突き合わせ
   const n = u.times.length;
@@ -1058,7 +1103,7 @@ function usageLabel(u) {
   if (u.kind === 'prn') return [u.prn.join('・') || '', '頓用', u.perDose ? `1回${u.perDose}` : ''].filter(Boolean).join(' ');
   const tt = timingText(u);
   const head = u.freq ? u.freq : (u.perDay ? `分${u.perDay}` : '');
-  let body = u.kind === 'ext' ? [tt, u.ext.join('・')].filter(Boolean).join(' ') : tt;
+  let body = u.kind === 'ext' ? [tt, u.ext.join('・'), u.site ? `（${u.site}）` : ''].filter(Boolean).join(' ') : tt;
   if (!body && u.perDose) body = `1回${u.perDose}`;   // 吸入薬など時点の書かれない用法
   const uneq = u.unequal.length ? `（${u.unequal.join('・')}）` : '';
   return [head, body].filter(Boolean).join(' ') + uneq || u.raw;
@@ -1079,6 +1124,163 @@ function isRxNameLine(line, prev) {
   }
   const ka = (line.match(/[ァ-ヴー]{4,}/) || [''])[0], kb = (prev.name.match(/[ァ-ヴー]{4,}/) || [''])[0];
   return ka.length >= 4 && kb.length >= 4 && (ka.startsWith(kb.slice(0, 4)) || kb.startsWith(ka.slice(0, 4)));
+}
+
+/* ================= 座標を使った読み解き（右から左へ） =================
+   OCRの行・単語の座標から、右端の「用量の列」を見つけ、その左を薬品名とする。
+   薬品名は右端から左へ1語ずつ伸ばしてマスターと照合し、最も一致する範囲を採用する
+   （「(内)◇」「(般)」など施設独自の記号は一致度を上げないので自然に外れる）。 */
+const DOSE_TOKEN = /^[(（]?(?:1日|1回)?\d+(?:\.\d+)?\s*(?:g|錠|枚|mL|ml|カプセル|C|包|本|個|T|瓶|袋|キット|吸入|mg|μg|単位|滴|噴霧)[)）]?$/;
+const JUNK_WORD = /^[|｜!！'"”“・。、,:：;_~〜^*＊$＄◇◆◎○●□■◯〇くぷぐい\-—–]+$/;   // 行の端にだけ使う
+function ocrWord(t) {
+  return normalize(t).replace(/(\d)\s*(?:meg|rng|mq|ng)(?![a-z])/g, '$1mg').replace(/(\d)\s*q$/, '$1g').replace(/^q$/, 'g').replace(/(\d)\s*[ilI|]/g, '$11');
+}
+const UNIT_FIX = { '名': '錠', '館': '錠', '餅': '錠', '叙': '錠', '人': '錠', '静': '錠', '鉄': '錠', '銃': '錠', '鏡': '錠', '綻': '錠', '枝': '枚', '牧': '枚', '瓶': '瓶', '剤': '錠' };
+function fixDoseText(t, nameHint) {
+  t = t.replace(/^[(（|lIi\]](?=[錠枚包gmL本個瓶C])/, '1').replace(/^[(（](\d)/, '$1').replace(/[)）]$/, '');
+  const m = t.match(/^(\d+(?:\.\d+)?)\s*(.*)$/);
+  if (!m) return '';
+  let u = m[2];
+  if (!/^(g|錠|枚|mL|ml|カプセル|C|包|本|個|T|瓶|袋|キット|吸入|mg|μg|単位|滴|噴霧|調剤)$/.test(u)) {
+    u = UNIT_FIX[u[0]] || (/錠/.test(nameHint || '') ? '錠' : /カプセル/.test(nameHint || '') ? 'カプセル' : u);
+  }
+  return m[1] + u;
+}
+function splitDose(words, W, h = 20) {
+  // 右から：記号のゴミを飛ばし、1〜3語をつなげて用量の形になれば用量とする
+  let end = words.length;
+  while (end > 0 && JUNK_WORD.test(words[end - 1].t) && words[end - 1].x0 > W * 0.5) end--;
+  for (let k = Math.min(3, end); k >= 1; k--) {
+    const ws = words.slice(end - k, end);
+    const txt = ws.map(w => w.t).join('');
+    const prev = words[end - k - 1];
+    if (prev && ws[0].x0 - prev.x1 < h * 1.5) continue;   // 名前に続く「1mg」などは用量ではない
+    if (ws[0].x0 > W * 0.55 && DOSE_TOKEN.test(txt)) return { dose: txt.replace(/^[(（]|[)）]$/g, ''), left: words.slice(0, end - k), x0: ws[0].x0 };
+    // 文字が誤読されていても、右端の列に離れて置かれた「数字＋1〜2文字」は用量とみなす
+    if (ws[0].x0 > W * 0.6 && (!prev || ws[0].x0 - prev.x1 > h * 2.5) && /^[(（|lIi\]]?\d*(?:\.\d+)?\S{0,3}$/.test(txt) && /^[(（|lIi\]\d]/.test(txt) && !/日分|回分/.test(txt)) {
+      const left = words.slice(0, end - k);
+      const fixed = fixDoseText(txt, left.map(w => w.t).join(''));
+      if (fixed) return { dose: fixed, left, x0: ws[0].x0 };
+    }
+  }
+  return { dose: '', left: words.slice(0, end) };
+}
+// 単語の間隔を見て、本当に空いている所だけ空白を入れてつなぐ（日本語は1文字ずつに分かれて返るため）
+function joinWords(words, h) {
+  let out = '';
+  words.forEach((w, i) => {
+    if (i && w.x0 - words[i - 1].x1 > h * 0.6) out += ' ';
+    out += w.t;
+  });
+  return out.replace(/(\d)\s*[.．,]\s*(\d)/g, '$1.$2').replace(/\s+/g, ' ').trim();
+}
+function bestNameSuffix(words, h) {
+  // 右端から左へ伸ばしながらマスターと照合し、一致度が最も高い範囲を返す
+  let best = null;
+  for (let i = words.length - 1; i >= 0; i--) {
+    const cand = joinWords(words.slice(i), h).replace(/\s+/g, '').replace(/^[^ァ-ヴA-Za-z0-9一-龥ぁ-ん【(（]+/, '');
+    if (cand.replace(/[^ァ-ヴA-Za-z一-龥]/g, '').length < 2) continue;
+    const top = searchMaster(cand, 2);
+    if (!top[0]) continue;
+    const core = cand.replace(/「[^」]*」?$/, '').replace(/[^ァ-ヴA-Za-z一-龥]/g, '').length;
+    const score = top[0].sim * Math.min(1, core / 4);
+    if (!best || score > best.score + 0.02 || (score > best.score - 0.03 && cand.length > best.cand.length))
+      best = { i, cand, sim: top[0].sim, score, top: top[0], second: top[1] };
+  }
+  return best;
+}
+const cleanTail = t => t.replace(/[\s|｜:：;,、。]+$/, '').replace(/(\s*[ー\-]{2,}|\s+\d)$/, '').trim();
+const RX_LINE = /(一般名|【般】|\[般\]|\(般\)|（般）|〔般〕|^般)/;
+function stripMarks(t) {
+  t = t.replace(/^\s*[\[［(（]?\s*\d{1,2}\s*[\]］)）]\s*/, '').replace(/^\s*\d{1,2}\s+(?=[ァ-ヴA-Za-z一-龥])/, '');
+  return t.replace(/^[^ァ-ヴA-Za-z0-9一-龥ぁ-ん【]*(?:\((?:内|外|頓|注|屯)\)|（(?:内|外|頓|注|屯)）)?[^ァ-ヴA-Za-z0-9一-龥ぁ-ん【]*/, '').trim();
+}
+
+function parseLayout(pages) {
+  const clinics = [];
+  let current = -1, waiting = [], lastGroup = [], lastDrug = null, prevKind = '';
+  const ci = () => {
+    if (current < 0) { clinics.push({ id: uid(), name: '医療機関不明', drugs: [] }); current = clinics.length - 1; }
+    return current;
+  };
+  const drugAt = r => r && clinics[r[0]].drugs[r[1]];
+  for (const page of pages) {
+    const lines = (page.lines || []).map(l => ({
+      y0: l.bbox.y0, y1: l.bbox.y1, h: Math.max(8, l.bbox.y1 - l.bbox.y0),
+      words: l.words.map(w => ({ t: ocrWord(w.text), x0: w.bbox.x0, x1: w.bbox.x1 })).filter(w => w.t)
+    })).filter(l => l.words.length).sort((a, b) => a.y0 - b.y0);
+    const W = Math.max(1, ...lines.map(l => l.words[l.words.length - 1].x1));
+    for (const l of lines) {
+      const { dose, left } = splitDose(l.words, W, l.h);
+      const text = joinWords(left, l.h);
+      const bare = stripMarks(text).replace(/^[|｜]\s*/, '');
+
+      // 医療機関・ノイズ
+      const cn = text && clinicName(bare.replace(/^.*?医療機関名?\s*[:：]\s*/, ''));
+      if (cn) {
+        const unk = current >= 0 && clinics[current].name === '医療機関不明' ? clinics[current] : null;
+        if (unk && !clinics.some(c => c.name === cn)) { unk.name = cn; waiting = []; lastDrug = null; prevKind = 'clinic'; continue; }
+        const i = clinics.findIndex(c => c.name === cn);
+        if (i >= 0) current = i; else { clinics.push({ id: uid(), name: cn, drugs: [] }); current = clinics.length - 1; }
+        waiting = []; lastDrug = null; prevKind = 'clinic'; continue;
+      }
+      if (bare && (NOISE.test(bare) || PHARM.test(bare))) { prevKind = 'noise'; continue; }
+
+      // 用量だけの行 → 直前の薬
+      if (!bare && dose) {
+        const d = drugAt(lastDrug);
+        if (d && !d.dose) d.dose = dose;
+        continue;
+      }
+      // 「(0.5g)」のような括弧書きの量 → 直前の薬の補足
+      if (/^[(（]?\s*\d+(?:\.\d+)?\s*[a-zA-Z錠枚包]+\s*[)）]?$/.test(bare)) {
+        const d = drugAt(lastDrug);
+        if (d) d.note = (d.note ? d.note + ' ' : '') + bare;
+        continue;
+      }
+      // 一般名（処方箋記載名）の行
+      if (RX_LINE.test(bare) && lastDrug) {
+        const d = drugAt(lastDrug);
+        d.rxName = cleanTail(bare.replace(/^.*?(一?般名\s*[:：]?\s*)/, ''));
+        if (!d.dose && dose) d.dose = dose;
+        prevKind = 'rx'; continue;
+      }
+      // 用法の行（◆〜）
+      const su = structUsage(bare);
+      const usageLike = su.found && (su.times.length || su.perDay || su.days || su.prn.length || su.prnFlag || su.freq || su.meal || su.ext.length);
+      let match = null;
+      if (Master.ready && bare) match = bestNameSuffix(left, l.h);
+      const drugLike = (match && match.score >= 0.5) || isDrugLine(bare) || (!!dose && /[ァ-ヴー]{3,}/.test(bare));
+      if (usageLike && (!drugLike || su.startStrict === 0 || (match && match.sim < 0.65))) {
+        let targets = prevKind === 'usage' ? lastGroup : waiting.length ? waiting : lastDrug ? [lastDrug] : [];
+        const utext = su.text.replace(/^[^0-9A-Za-zぁ-んァ-ヴ一-龥]+/, '').trim();   // 読み残しも残して⚠で知らせる
+        for (const r of targets) { const d = drugAt(r); d.usage = d.usage ? d.usage + ' ' + utext : utext; }
+        if (targets.length) { lastGroup = targets; waiting = []; }
+        prevKind = 'usage'; continue;
+      }
+      // 薬品名の行
+      if (drugLike) {
+        const name = match ? match.cand : splitDrugLine(bare).name;
+        const d = newDrug(cleanName(name), dose, '');
+        if (match) {
+          d.rawName = name;
+          if (match.sim >= 0.85 && (!match.second || match.sim - match.second.sim >= 0.04)) applyMaster(d, match.top, match.sim);
+        }
+        const c = ci();
+        clinics[c].drugs.push(d);
+        lastDrug = [c, clinics[c].drugs.length - 1];
+        waiting.push(lastDrug);
+        prevKind = 'drug'; continue;
+      }
+      // 続きの行：一般名の折り返し（「0%」など）／用法の後の部位（「手足 体 顔」）
+      if (bare && prevKind === 'rx' && bare.length <= 6) { const d = drugAt(lastDrug); d.rxName = cleanTail(d.rxName + bare); continue; }
+      if (bare && prevKind === 'usage' && !/\d/.test(bare) && /[一-龥]/.test(bare) && bare.length <= 20) {
+        for (const r of lastGroup) { const d = drugAt(r); d.usage += ' 部位:' + bare.replace(/\s+/g, '・'); }
+        continue;
+      }
+    }
+  }
+  return clinics.filter(c => c.drugs.length);
 }
 
 function merge(incoming) {
@@ -1116,15 +1318,20 @@ function deleteDrug(id) {
 const Master = { items: [], norm: [], bigram: new Map(), gs1: new Map(), gs1Core: new Map(), byHot: new Map(), meta: null, ready: false };
 const YJ_RE = /^\d{4}[0-9A-Z]{3}[A-Z][0-9A-Z]{4}$/;   // 漢方・生薬は英字を含む（例: 510000CA1020）
 
+// 照合用の読み：OCRが取り違えやすい文字は同じものとして扱う（表示名は変えない）
+const FOLD = { 'パ': 'バ', 'ピ': 'ビ', 'プ': 'ブ', 'ペ': 'ベ', 'ポ': 'ボ', '一': 'ー', '－': 'ー', '‐': 'ー', '-': 'ー', '口': 'ロ', '力': 'カ', '工': 'エ', '夕': 'タ', '卜': 'ト' };
 function normName(s) {
   return toKata((s || '').normalize('NFKC'))
     .replace(/【般】|\[般\]|\(般\)/g, '')
     .replace(/[\s・「」『』"'“”]/g, '')
+    .replace(/[パピプペポ一－‐\-口力工夕卜]/g, c => FOLD[c] || c)
+    .replace(/ナトリウム/g, 'NA').replace(/カリウム/g, 'K').replace(/カルシウム/g, 'CA').replace(/マグネシウム/g, 'MG')
     .toUpperCase();
 }
 function buildIndex() {
   Master.norm = Master.items.map(it => normName(it.n));
   const idx = new Map();
+  Master.nb = new Uint16Array(Master.norm.length);
   Master.norm.forEach((s, i) => {
     const seen = new Set();
     for (let k = 0; k < s.length - 1; k++) {
@@ -1134,6 +1341,7 @@ function buildIndex() {
       let a = idx.get(b); if (!a) { a = []; idx.set(b, a); }
       a.push(i);
     }
+    Master.nb[i] = seen.size;
   });
   Master.bigram = idx;
   Master.gs1 = new Map(); Master.gs1Core = new Map(); Master.byHot = new Map(); Master.pkg = new Map();
@@ -1186,7 +1394,9 @@ function searchMaster(q, k = 6, loose = false) {
     const a = Master.bigram.get(b); if (!a) continue;
     for (const id of a) { if (!score[id]) touched.push(id); score[id]++; }
   }
-  touched.sort((x, y) => score[y] - score[x]);
+  const qn = seen.size || 1;
+  const dice = id => 2 * score[id] / (qn + (Master.nb[id] || 1));
+  touched.sort((x, y) => dice(y) - dice(x) || score[y] - score[x]);
   const nb = seen.size || 1;
   const nums = s.match(/\d+(\.\d+)?/g) || [];
   const res = touched.slice(0, 400).map(id => {
@@ -1789,7 +1999,8 @@ const PANELS = {
               </div>
               ${Master.ready ? (matched(d)
                 ? `<div class="rv-badge ok">✓ マスター照合 ${Math.round((d.matchSim || 1) * 100)}%${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>`
-                : `<div class="rv-badge ng">マスター未照合（取り込み後、数量入力画面で候補から選べます）</div>`) : ''}
+                : `<div class="rv-badge ng">マスター未照合：候補をタップしてください</div>
+                   <div class="cands">${searchMaster(d.rawName || d.name, 3, true).map((c, k) => `<button class="cand" data-act="rvPick" data-i="${ci}" data-j="${di}" data-k="${k}"><span class="cn">${esc(c.n)}</span><span class="cs">一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`) : ''}
               <div class="rv-pair"><span>用量</span><input class="txt" data-rv="${ci}|${di}|dose" value="${esc(d.dose)}" placeholder="例: 1錠"></div>
               <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
               ${d.rxName ? `<div class="rv-badge">処方名：${esc(d.rxName)}</div>` : ''}
@@ -2163,7 +2374,10 @@ function extBlocks(d) {
 function openHeat(id) { touch(id); save(); openPanel({ type: 'heat', id }); }
 
 function makeReview(text) {
-  const clinics = parse(text);
+  // 写真から読んだままなら座標を使って読み解く。手で直した・貼り付けた場合は文字だけで読む
+  let clinics = [];
+  if (ui.scanPages?.length && ui.scanPagesText === ui.scanText) clinics = parseLayout(ui.scanPages);
+  if (!clinics.length) clinics = parse(text);
   for (const c of clinics) for (const d of c.drugs) autoMatch(d);
   return { clinics, raw: text };
 }
@@ -2208,7 +2422,7 @@ const actions = {
   camClose: () => camClose(),
   camShot: () => camShot(),
   camTorch: () => camTorch(),
-  scanClear:() => { ui.scanText = ''; save(); renderPanel(); },
+  scanClear: () => { ui.scanText = ''; ui.scanPages = []; ui.scanPagesText = ''; save(); renderPanel(); },
   scanSample: () => { ui.scanText = SAMPLE; save(); renderPanel(); },
   analyze: () => {
     const text = ui.scanText.trim();
@@ -2216,19 +2430,24 @@ const actions = {
     openPanel({ type: 'review', review: makeReview(text) });
   },
   backToScan: () => openPanel({ type: 'scan' }),
+  rvPick: el => {
+    const d = ui.panel.review.clinics[+el.dataset.i].drugs[+el.dataset.j];
+    const c = searchMaster(d.rawName || d.name, 3, true)[+el.dataset.k];
+    if (c) { applyMaster(d, c, Math.max(c.sim, 0.99)); renderPanel(); }
+  },
   rvDelClinic: el => { ui.panel.review.clinics.splice(+el.dataset.i, 1); renderPanel(); },
   rvDelDrug: el => { ui.panel.review.clinics[+el.dataset.i].drugs.splice(+el.dataset.j, 1); renderPanel(); },
   rvAddDrug: el => { ui.panel.review.clinics[+el.dataset.i].drugs.push(newDrug()); renderPanel(); },
   rvAddClinic: () => { ui.panel.review.clinics.push({ id: uid(), name: '', drugs: [newDrug()] }); renderPanel(); },
   rvNext: () => {
     const r = merge(ui.panel.review.clinics);
-    ui.scanText = ''; save();
+    ui.scanText = ''; ui.scanPages = []; ui.scanPagesText = ''; save();
     openPanel({ type: 'scan' });
     flashNote(r);
   },
   rvDone: () => {
     const r = merge(ui.panel.review.clinics);
-    ui.scanText = ''; save();
+    ui.scanText = ''; ui.scanPages = []; ui.scanPagesText = ''; save();
     closePanel();
     flashNote(r);
   },
