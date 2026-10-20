@@ -698,9 +698,22 @@ function ocrImage(src) {
       const lines = [];
       for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || [])
         lines.push({ bbox: l.bbox, words: (l.words || []).map(w => ({ text: w.text, bbox: w.bbox })) });
+      // 半角カタカナ対策：横に2倍に引き伸ばした画像でも読み、行ごとに使い分ける
+      let wide = [];
+      // 照合できない薬名がある場合だけ、横2倍でもう一度読む（時間がかかるため）
+      const needWide = Master.ready && parseLayout([{ lines }]).some(c => c.drugs.some(d => !d.yj));
+      if (needWide) {
+        ocrStatus('半角カナ対策の読み取り中…', 0);
+        const w2 = document.createElement('canvas');
+        w2.width = canvas.width * 2; w2.height = canvas.height;
+        w2.getContext('2d').drawImage(canvas, 0, 0, w2.width, w2.height);
+        const r2 = await w.recognize(w2, {}, { text: false, blocks: true });
+        for (const b of r2.data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || [])
+          wide.push({ bbox: { x0: l.bbox.x0 / 2, x1: l.bbox.x1 / 2, y0: l.bbox.y0, y1: l.bbox.y1 }, words: (l.words || []).map(x => ({ text: x.text, bbox: { x0: x.bbox.x0 / 2, x1: x.bbox.x1 / 2, y0: x.bbox.y0, y1: x.bbox.y1 } })) });
+      }
       OCR.pages++;
       appendScanText(text);
-      ui.scanPages = [...(ui.scanPages || []), { text, lines }];
+      ui.scanPages = [...(ui.scanPages || []), { text, lines, wide }];
       try { window.__jishiyakuOcr = ui.scanPages; } catch (e) {}
       ui.scanPagesText = ui.scanText;
       OCR.pending--;
@@ -1210,8 +1223,17 @@ function parseLayout(pages) {
       words: l.words.map(w => ({ t: ocrWord(w.text), x0: w.bbox.x0, x1: w.bbox.x1 })).filter(w => w.t)
     })).filter(l => l.words.length).sort((a, b) => a.y0 - b.y0);
     const W = Math.max(1, ...lines.map(l => l.words[l.words.length - 1].x1));
+    const wideLines = (page.wide || []).map(l => ({ yc: (l.bbox.y0 + l.bbox.y1) / 2, words: l.words.map(w => ({ t: ocrWord(w.text), x0: w.bbox.x0, x1: w.bbox.x1 })) }));
+    const wideCands = (l, doseX0, numsText) => {
+      const yc = (l.y0 + l.y1) / 2;
+      const wl = wideLines.find(x => Math.abs(x.yc - yc) < l.h * 0.6);
+      if (!wl) return [];
+      const sk = kanaSkeleton(wl.words.filter(w => !doseX0 || w.x1 < doseX0).map(w => w.t).join(''));
+      const strengths = (numsText.normalize('NFKC').match(/\d+(?:\.\d+)?(?:mg|μg|%|g)/g) || []);
+      return searchSkeleton(sk, strengths, 3);
+    };
     for (const l of lines) {
-      const { dose, left } = splitDose(l.words, W, l.h);
+      const { dose, left, x0: doseX0 } = splitDose(l.words, W, l.h);
       const text = joinWords(left, l.h);
       const bare = stripMarks(text).replace(/^[|｜]\s*/, '');
 
@@ -1250,7 +1272,12 @@ function parseLayout(pages) {
       const usageLike = su.found && (su.times.length || su.perDay || su.days || su.prn.length || su.prnFlag || su.freq || su.meal || su.ext.length);
       let match = null;
       if (Master.ready && bare) match = bestNameSuffix(left, l.h);
-      const drugLike = (match && match.score >= 0.5) || isDrugLine(bare) || (!!dose && /[ァ-ヴー]{3,}/.test(bare));
+      let drugLike = (match && match.score >= 0.5) || isDrugLine(bare) || (!!dose && /[ァ-ヴー]{3,}/.test(bare));
+      let alt = [];
+      if (Master.ready && !usageLike && (dose || drugLike) && (!match || match.sim < 0.85)) {
+        alt = wideCands(l, doseX0, bare);
+        if (alt[0] && alt[0].sim >= 0.5 && (!match || alt[0].sim > match.sim)) drugLike = true;
+      }
       if (usageLike && (!drugLike || su.startStrict === 0 || (match && match.sim < 0.65))) {
         let targets = prevKind === 'usage' ? lastGroup : waiting.length ? waiting : lastDrug ? [lastDrug] : [];
         const utext = su.text.replace(/^[^0-9A-Za-zぁ-んァ-ヴ一-龥]+/, '').trim();   // 読み残しも残して⚠で知らせる
@@ -1262,6 +1289,7 @@ function parseLayout(pages) {
       if (drugLike) {
         const name = match ? match.cand : splitDrugLine(bare).name;
         const d = newDrug(cleanName(name), dose, '');
+        if (alt.length && alt[0].sim >= 0.7 && (!match || alt[0].sim > match.sim)) d.cands = alt;   // 半角カナなど：確かな候補だけ出す
         if (match) {
           d.rawName = name;
           if (match.sim >= 0.85 && (!match.second || match.sim - match.second.sim >= 0.04)) applyMaster(d, match.top, match.sim);
@@ -1328,7 +1356,58 @@ function normName(s) {
     .replace(/ナトリウム/g, 'NA').replace(/カリウム/g, 'K').replace(/カルシウム/g, 'CA').replace(/マグネシウム/g, 'MG')
     .toUpperCase();
 }
+// カタカナの骨格：カタカナだけを取り出し、濁点・半濁点・小書き・長音を落とす（半角カナの誤読に強い）
+const SMALL = { 'ァ': 'ア', 'ィ': 'イ', 'ゥ': 'ウ', 'ェ': 'エ', 'ォ': 'オ', 'ャ': 'ヤ', 'ュ': 'ユ', 'ョ': 'ヨ', 'ッ': 'ツ', 'ヮ': 'ワ' };
+function kanaSkeleton(s) {
+  // 規格の数字（10mg など）より前の「名前の部分」だけを使う。行頭の括弧の誤読は無視
+  let t = toKata((s || '').normalize('NFKC')).replace(/^[^ァ-ヴ一-龥A-Za-z]+/, '');
+  const m = t.match(/\d[\dOo.]*\s*(?:mg|rng|meg|μg|g|%|mL)/);
+  if (m && m.index > 1) t = t.slice(0, m.index);
+  t = t.replace(/「[^」]*」?\s*$/, '');
+  return t.replace(/[^ァ-ヴ]/g, '')
+    .normalize('NFD').replace(/[\u3099\u309A]/g, '').normalize('NFC').replace(/[ァィゥェォャュョッヮ]/g, c => SMALL[c]);
+}
+// 薬名の骨格 p が、OCRの骨格 a の「どこか一部分」とどれだけ一致するか（前後のゴミは無視）
+function semiLev(a, p) {
+  const m = p.length, n = a.length;
+  let prev = new Uint16Array(n + 1), cur = new Uint16Array(n + 1);   // prev[j]=0：aのどこから始めてもよい
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    const c = p.charCodeAt(i - 1);
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (c === a.charCodeAt(j - 1) ? 0 : 1));
+    [prev, cur] = [cur, prev];
+  }
+  let best = m;
+  for (let j = 0; j <= n; j++) if (prev[j] < best) best = prev[j];
+  return best;
+}
+function searchSkeleton(sk, strengths, k = 3) {
+  if (!Master.ready || sk.length < 3) return [];
+  const res = [];
+  for (let i = 0; i < Master.items.length; i++) {
+    const p = Master.skel[i];
+    if (!p || p.length < 3 || p.length > sk.length + 3) continue;
+    const full = 1 - lev(sk, p) / Math.max(sk.length, p.length);
+    const part = (1 - semiLev(sk, p) / p.length) * Math.min(1, p.length / 5, p.length / (sk.length * 0.6));
+    let sim = Math.max(full, part);
+    if (sim < 0.45) continue;
+    const name = Master.items[i].n.normalize('NFKC').replace(/\s/g, '');
+    if (strengths.length && strengths.every(x => name.includes(x))) sim += 0.1;
+    res.push({ i, sim });
+  }
+  res.sort((a, b) => b.sim - a.sim);
+  const out = [], seen = new Set();
+  for (const r of res) {
+    const it = Master.items[r.i];
+    if (seen.has(it.n)) continue;
+    seen.add(it.n); out.push({ n: it.n, y: it.y || '', sim: Math.min(1, r.sim) });
+    if (out.length >= k) break;
+  }
+  return out;
+}
+
 function buildIndex() {
+  Master.skel = Master.items.map(it => kanaSkeleton(it.n));
   Master.norm = Master.items.map(it => normName(it.n));
   const idx = new Map();
   Master.nb = new Uint16Array(Master.norm.length);
@@ -2000,7 +2079,7 @@ const PANELS = {
               ${Master.ready ? (matched(d)
                 ? `<div class="rv-badge ok">✓ マスター照合 ${Math.round((d.matchSim || 1) * 100)}%${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>`
                 : `<div class="rv-badge ng">マスター未照合：候補をタップしてください</div>
-                   <div class="cands">${searchMaster(d.rawName || d.name, 3, true).map((c, k) => `<button class="cand" data-act="rvPick" data-i="${ci}" data-j="${di}" data-k="${k}"><span class="cn">${esc(c.n)}</span><span class="cs">一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`) : ''}
+                   <div class="cands">${(d.cands?.length ? d.cands : searchMaster(d.rawName || d.name, 3, true)).map((c, k) => `<button class="cand" data-act="rvPick" data-i="${ci}" data-j="${di}" data-k="${k}"><span class="cn">${esc(c.n)}</span><span class="cs">一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`) : ''}
               <div class="rv-pair"><span>用量</span><input class="txt" data-rv="${ci}|${di}|dose" value="${esc(d.dose)}" placeholder="例: 1錠"></div>
               <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
               ${d.rxName ? `<div class="rv-badge">処方名：${esc(d.rxName)}</div>` : ''}
@@ -2432,7 +2511,7 @@ const actions = {
   backToScan: () => openPanel({ type: 'scan' }),
   rvPick: el => {
     const d = ui.panel.review.clinics[+el.dataset.i].drugs[+el.dataset.j];
-    const c = searchMaster(d.rawName || d.name, 3, true)[+el.dataset.k];
+    const c = (d.cands?.length ? d.cands : searchMaster(d.rawName || d.name, 3, true))[+el.dataset.k];
     if (c) { applyMaster(d, c, Math.max(c.sim, 0.99)); renderPanel(); }
   },
   rvDelClinic: el => { ui.panel.review.clinics.splice(+el.dataset.i, 1); renderPanel(); },
