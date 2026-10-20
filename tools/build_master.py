@@ -414,6 +414,136 @@ def parse_supply(tables):
     return out
 
 
+# ---------- 採用薬リスト（棚表） ----------
+FORM_SRC = ROOT / 'formulary-src'
+FIXES = ROOT / 'formulary-fixes.csv'
+FOLD = str.maketrans({'パ': 'バ', 'ピ': 'ビ', 'プ': 'ブ', 'ペ': 'ベ', 'ポ': 'ボ', '一': 'ー', '－': 'ー', '‐': 'ー', '-': 'ー',
+                      '口': 'ロ', '力': 'カ', '工': 'エ', '夕': 'タ', '卜': 'ト'})
+NUM_RE = re.compile(r'\d+(?:\.\d+)?')
+STRENGTH_COL = re.compile(r'^\d+(?:\.\d+)?\s*(mg|g|%|μg|mL|ml|単位|mEq|IU)')
+
+
+def nkey(s):
+    s = unicodedata.normalize('NFKC', s or '')
+    s = ''.join(chr(ord(c) + 0x60) if 'ぁ' <= c <= 'ゖ' else c for c in s)
+    s = re.sub(r'【般】|\[般\]|\(般\)|（般）', '', s)
+    s = re.sub(r'[\s・「」『』"\'“”()（）]', '', s).translate(FOLD)
+    s = s.replace('ナトリウム', 'NA').replace('カリウム', 'K').replace('カルシウム', 'CA').replace('マグネシウム', 'MG')
+    return s.upper()
+
+
+def formulary_rows(tables):
+    """棚表から「薬品名（＋規格の列）」と、あればコードを取り出す"""
+    out = []
+    for tname, rows in tables:
+        sample = [r for r in rows[:300] if any(r)]
+        width = max((len(r) for r in sample), default=0)
+        if not width:
+            continue
+
+        def ratio(i, test):
+            vals = [r[i] for r in sample if i < len(r) and r[i]]
+            return sum(1 for v in vals if test(v)) / max(1, len(sample))
+        name_col = max(range(width), key=lambda i: ratio(i, lambda v: bool(re.search(r'[ァ-ヴｦ-ﾟ]{2,}', v))))
+        if ratio(name_col, lambda v: bool(re.search(r'[ァ-ヴｦ-ﾟ]{2,}', v))) < 0.2:
+            continue
+        spec_cols = [i for i in range(width) if i != name_col and ratio(i, lambda v: bool(STRENGTH_COL.match(v))) > 0.2]
+        code_col = next((i for i in range(width) if ratio(i, lambda v: bool(YJ_RE.fullmatch(v.upper()))) > 0.2), -1)
+        print(f'  棚表: {tname}  名前={name_col} 規格={spec_cols} コード={code_col}')
+        for r in rows:
+            g = lambda i: r[i] if 0 <= i < len(r) else ''
+            name = g(name_col)
+            if not name or not re.search(r'[ァ-ヴｦ-ﾟA-Za-z一-龥]{2,}', name) or re.search(r'薬品名|品名|医薬品名', name):
+                continue
+            spec = ' '.join(g(i) for i in spec_cols if g(i) and g(i) not in name)
+            out.append({'r': (name + (' ' + spec if spec else '')).strip(), 'code': g(code_col).upper() if code_col >= 0 else ''})
+    return out
+
+
+def build_formulary(items):
+    from rapidfuzz import fuzz, process
+    tables = []
+    for p in sorted(FORM_SRC.glob('*')):
+        if p.is_file() and p.suffix.lower() in ('.xlsx', '.xlsm', '.xls', '.csv', '.txt', '.tsv'):
+            tables += list(tables_from_bytes(p.name, p.read_bytes()))
+    if not tables:
+        return None
+    rows = formulary_rows(tables)
+    fixes = {}
+    if FIXES.exists():
+        import csv
+        for r in csv.reader(io.StringIO(decode(FIXES.read_bytes()))):
+            if len(r) >= 2 and r[0].strip() and not r[0].startswith('#') and r[0].strip() != '棚表の表記':
+                fixes[nkey(r[0])] = r[1].strip().upper()
+    keys = [nkey(it['n']) for it in items]
+    by_y = {}
+    for it in items:
+        if it.get('y'):
+            by_y.setdefault(it['y'], it)
+    out, seen = [], set()
+    for row in rows:
+        raw = row['r']
+        k = nkey(raw)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        rec = {'r': raw}
+        fix = fixes.get(k)
+        if fix == '除外':
+            continue
+        code = fix or (row['code'] if YJ_RE.fullmatch(row['code']) else '')
+        if code:
+            it = by_y.get(code)
+            rec.update(y=code, n=it['n'] if it else raw, s=100, st='fix' if fix else 'ok')
+            out.append(rec)
+            continue
+        nums = NUM_RE.findall(k)
+        cands = []
+        for name_key, score, idx in process.extract(k, keys, scorer=fuzz.WRatio, limit=25):
+            cn = NUM_RE.findall(name_key)
+            if nums and any(n not in cn for n in nums):
+                score -= 25                         # 規格の数字が違うものは大きく下げる
+            if not nums and cn:
+                score -= 5
+            cands.append((score, idx))
+        cands.sort(key=lambda x: -x[0])
+        uniq, used = [], set()
+        for score, idx in cands:
+            it = items[idx]
+            if it['n'] in used:
+                continue
+            used.add(it['n'])
+            uniq.append((round(score), it))
+            if len(uniq) >= 4:
+                break
+        if not uniq:
+            rec.update(st='none')
+            out.append(rec)
+            continue
+        top_s, top = uniq[0]
+        second = uniq[1] if len(uniq) > 1 else None
+        same9 = second and top.get('y') and second[1].get('y') and top['y'][:9] == second[1]['y'][:9]
+        if top_s >= 88 and (not second or top_s - second[0] >= 4):
+            st = 'ok'
+        elif top_s >= 85 and same9:
+            st = 'amb'                              # 銘柄（メーカー）だけ曖昧。成分・剤形・規格は確定
+        elif top_s >= 60:
+            st = 'check'
+        else:
+            st = 'none'
+        rec.update(y=top.get('y', ''), n=top['n'], s=top_s, st=st)
+        if st != 'ok':
+            rec['c'] = [[it['n'], it.get('y', ''), sc] for sc, it in uniq]
+        out.append(rec)
+    counts = {k: sum(1 for r in out if r['st'] == k) for k in ('ok', 'fix', 'amb', 'check', 'none')}
+    ver = hashlib.sha1(json.dumps(out, ensure_ascii=False).encode()).hexdigest()[:12]
+    meta = {'version': ver, 'date': datetime.now(JST).strftime('%Y/%m/%d'), 'count': len(out), 'counts': counts,
+            'files': [p.name for p in sorted(FORM_SRC.glob('*')) if p.is_file() and not p.name.startswith('.') and p.name != 'README.md']}
+    write_json(ROOT / 'formulary.json', {'meta': meta, 'items': out})
+    print(f'棚表 {len(out):,}品目 確定{counts["ok"] + counts["fix"]:,} 銘柄あいまい{counts["amb"]:,} 要確認{counts["check"]:,} 該当なし{counts["none"]:,}')
+    return meta
+
+
 def write_json(path, obj):
     path.write_text(json.dumps(obj, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
 
@@ -481,6 +611,16 @@ def main():
             print(f'供給状況 {len(supply):,}品目 ' + ' / '.join(f'{k}{v:,}' for k, v in counts.items()))
         except Exception as e:
             failed.append(f'供給状況: {e}')
+
+    # 3) 採用薬リスト（棚表）
+    try:
+        mfile = ROOT / 'master.json'
+        if mfile.exists() and FORM_SRC.exists():
+            fm = build_formulary(json.loads(mfile.read_text(encoding='utf-8'))['items'])
+            if fm:
+                meta['formulary'] = fm
+    except Exception as e:
+        failed.append(f'採用薬リスト: {e}')
 
     if meta:
         if failed:

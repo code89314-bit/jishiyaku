@@ -12,6 +12,8 @@ on:
   push:
     paths:
       - 'master-src/**'
+      - 'formulary-src/**'
+      - 'formulary-fixes.csv'
       - 'tools/build_master.py'
   workflow_dispatch:
     inputs:
@@ -35,7 +37,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install pandas openpyxl xlrd
+      - run: pip install pandas openpyxl xlrd rapidfuzz
       - name: 厚労省から取得して変換
         env:
           URLS: ${{ github.event.inputs.urls }}
@@ -44,7 +46,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          for f in master.json master-meta.json supply.json; do [ -f "$f" ] && git add "$f"; done
+          for f in master.json master-meta.json supply.json formulary.json; do [ -f "$f" ] && git add "$f"; done
           if git diff --cached --quiet; then
             echo "変更はありません"
           else

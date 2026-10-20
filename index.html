@@ -1724,6 +1724,127 @@ async function pullSupply(meta) {
   } catch (e) { return false; }
 }
 
+/* ---- 院内採用薬リスト（棚表をマスターと照合した結果）と代替薬の判定 ----
+   YJコード（12桁）：1-4 薬効分類／5-7 投与経路・成分／8 剤形／9 規格／10-11 銘柄 */
+const Form = { items: [], meta: null, byY: new Map(), by: { 9: new Map(), 8: new Map(), 7: new Map(), 4: new Map() }, fixes: [] };
+const FORM_USE = new Set(['ok', 'fix', 'amb']);
+function buildFormIndex() {
+  Form.byY = new Map(); for (const k of [9, 8, 7, 4]) Form.by[k] = new Map();
+  for (const r of Form.items) {
+    if (!r.y || !FORM_USE.has(r.st)) continue;
+    Form.byY.set(r.y, r);
+    for (const k of [9, 8, 7, 4]) { const key = r.y.slice(0, k); if (!Form.by[k].has(key)) Form.by[k].set(key, []); Form.by[k].get(key).push(r); }
+  }
+}
+async function pullFormulary(meta) {
+  const fv = meta?.formulary?.version;
+  if (!fv || Form.meta?.version === fv) return false;
+  try {
+    const r = await fetch('formulary.json?v=' + encodeURIComponent(fv), { cache: 'no-store' });
+    if (!r.ok) return false;
+    const data = await r.json();
+    Form.items = data.items || []; Form.meta = data.meta || meta.formulary;
+    applyLocalFixes(); buildFormIndex();
+    await idbSet('formulary', { items: Form.items, meta: Form.meta });
+    return true;
+  } catch (e) { return false; }
+}
+const masterByYJ = yj => yj ? Master.items.find(it => it.y === yj) : null;
+// 成分名：同じYJ、なければ成分が同じ（先頭7桁）の品目から取る
+let ING7 = null;
+function ingOf(yj) {
+  if (!yj) return '';
+  if (!ING7 || ING7.size === 0) { ING7 = new Map(); for (const it of Master.items) if (it.y && it.c && !ING7.has(it.y.slice(0, 7))) ING7.set(it.y.slice(0, 7), it.c); }
+  return masterByYJ(yj)?.c || ING7.get(yj.slice(0, 7)) || '';
+}
+const SALT = /(ベシル酸塩|塩酸塩|硫酸塩|マレイン酸塩|酒石酸塩|メシル酸塩|臭化水素酸塩|ナトリウム水和物|ナトリウム|カリウム|カルシウム水和物|カルシウム|水和物|シレキセチル|メドキソミル)$/;
+const bareIng = c => c.replace(SALT, '').replace(SALT, '');
+// 剤形の呼び名（OD錠／普通錠／散／顆粒…）
+function formWord(name) {
+  const n = (name || '').normalize('NFKC');
+  for (const [re, w] of [[/OD錠|口腔内崩壊錠/, 'OD錠'], [/OD(フィルム)/, 'ODフィルム'], [/チュアブル/, 'チュアブル錠'], [/徐放|L錠|LA錠|R錠|CR錠|SR錠/, '徐放錠'], [/腸溶錠/, '腸溶錠'],
+                         [/錠/, '普通錠'], [/カプセル/, 'カプセル'], [/ドライシロップ|DS/, 'DS'], [/シロップ/, 'シロップ'], [/細粒/, '細粒'], [/顆粒/, '顆粒'], [/散/, '散'], [/内用液|液/, '液'],
+                         [/テープ/, 'テープ'], [/パップ/, 'パップ'], [/軟膏/, '軟膏'], [/クリーム/, 'クリーム'], [/ローション/, 'ローション'], [/点眼/, '点眼液'], [/吸入/, '吸入'], [/坐剤|坐薬/, '坐剤'], [/注/, '注射']])
+    if (re.test(n)) return w;
+  return '';
+}
+function strengthOnly(name, yj) {
+  const it = masterByYJ(yj);
+  const sp = ((it?.s) || '').normalize('NFKC').replace(/\d+(錠|カプセル|包|枚|本|個|瓶|管|袋|g|mL)$/, '');
+  if (sp && /\d/.test(sp)) return sp.replace(/\s/g, '');
+  return ((name || '').normalize('NFKC').match(/\d+(?:\.\d+)?\s*(?:mg|μg|g|%)/) || [''])[0].replace(/\s/g, '');
+}
+// 採用薬が持参薬とどう違うかを短く書く：同じ規格で剤形だけ違う→「OD錠」、同じ剤形で規格違い→「2.5mg錠」
+function diffWord(d, r) {
+  const sD = strengthOnly(d.name, d.yj), sA = strengthOnly(r.n, r.y);
+  const fD = formWord(d.name), fA = formWord(r.n);
+  const fShort = fA === '普通錠' ? '錠' : fA;
+  if (sD && sD === sA && fD !== fA) return fA;
+  if (fD === fA) return sA + fShort;
+  return sA + fShort;
+}
+function strengthWord(r) {
+  const it = masterByYJ(r.y);
+  const sp = ((it?.s) || '').normalize('NFKC').replace(/\d+(錠|カプセル|包|枚|本|個|瓶|管|袋|g|mL)$/, '');
+  const fw = formWord(r.n).replace('普通錠', '錠');
+  return (sp && /\d/.test(sp) ? sp : (r.n.normalize('NFKC').match(/\d+(?:\.\d+)?\s*(?:mg|μg|g|%)/) || [''])[0]) + fw;
+}
+const supplyNote = y => { const s = supplyOfYJ(y); return s && s.code > 1 ? (s.code === 5 ? '※供給停止' : '※限定出荷') : ''; };
+const shortName = n => (n || '').replace(/^【般】/, '');
+
+// 代替薬の判定。戻り値 { kind, text, cands }
+function altFor(d) {
+  if (!Form.meta || !Form.items.length) return null;
+  if (d.altText) return { kind: 'manual', text: d.altText };
+  const yj = d.yj;
+  if (!yj) return { kind: 'unknown', text: '', note: 'マスター未照合のため判定できません' };
+  if (Form.byY.has(yj) && Form.byY.get(yj).st !== 'amb') return { kind: 'same', text: '' };
+  const pick = (list, fn) => list.map(r => ({ r, label: fn(r) + (supplyNote(r.y) ? ' ' + supplyNote(r.y) : '') }))
+    .sort((a, b) => (supplyNote(a.r.y) ? 1 : 0) - (supplyNote(b.r.y) ? 1 : 0));
+  const l9 = Form.by[9].get(yj.slice(0, 9));
+  if (l9) {
+    if (l9.some(r => r.y === yj)) return { kind: 'same', text: '' };
+    const c = pick(l9, r => shortName(r.n));
+    return { kind: 'brand', text: '院内採用：' + c[0].label, cands: c };
+  }
+  const l7 = Form.by[7].get(yj.slice(0, 7));
+  if (l7) {
+    // 成分が同じ：規格違い・剤形違い（OD錠と普通錠は9桁目で区別されることもあるので、名前と規格で判断）
+    const c = pick(l7, r => diffWord(d, r));
+    const words = [...new Set(c.map(x => x.label))];
+    const sameStrength = c.some(x => strengthOnly(x.r.n, x.r.y) === strengthOnly(d.name, d.yj));
+    return { kind: sameStrength ? 'form' : 'strength', text: '院内採用:' + words.join('、'), cands: c };
+  }
+  // 合剤：成分ごとに単剤を探す
+  const comps = ingOf(yj).replace(/配合剤$/, '').split(/[・\/／]/).map(x => x.trim()).filter(Boolean);
+  if (comps.length >= 2) {
+    const parts = comps.map(cp => {
+      const hit = Form.items.filter(r => r.y && FORM_USE.has(r.st) && ingOf(r.y) === cp);
+      return { cp, hit };
+    });
+    const found = parts.filter(x => x.hit.length);
+    const head = `（${comps.map(bareIng).join('+')}）`;
+    if (!found.length) return { kind: 'combo', text: '採用なし', head };
+    return { kind: 'combo', head, text: '採用なし　類似薬：' + found.map(x => shortName(x.hit[0].n) + (supplyNote(x.hit[0].y) ? supplyNote(x.hit[0].y) : '')).join('+')
+      + (found.length < parts.length ? '（' + parts.filter(x => !x.hit.length).map(x => bareIng(x.cp)).join('・') + 'は採用なし）' : '') };
+  }
+  // 類似薬：薬効分類（4桁）が同じ採用薬から、同じ剤形を優先して候補を出す
+  const l4 = Form.by[4].get(yj.slice(0, 4)) || [];
+  if (l4.length) {
+    const c = pick(l4, r => shortName(r.n)).sort((a, b) => (a.r.y[7] === yj[7] ? 0 : 1) - (b.r.y[7] === yj[7] ? 0 : 1)).slice(0, 8);
+    const chosen = d.altChoice ? `採用なし　類似薬：${d.altChoice}` : '採用なし';
+    return { kind: 'similar', text: chosen, cands: c, needChoice: !d.altChoice };
+  }
+  return { kind: 'none', text: '採用なし' };
+}
+function applyLocalFixes() {
+  try { Form.fixes = JSON.parse(localStorage.getItem('jishiyaku.formfix') || '[]'); } catch (e) { Form.fixes = []; }
+  for (const f of Form.fixes) {
+    const r = Form.items.find(x => x.r === f.r);
+    if (r) { if (f.y === '除外') r.st = 'excluded'; else { r.y = f.y; r.n = f.n; r.st = 'fix'; } }
+  }
+}
+
 /* ---- サーバー（GitHub Pages）からマスターを取得 ----
    master-meta.json の version が手元と違うときだけ master.json を取りに行く */
 let pulling = false;
@@ -1744,7 +1865,7 @@ async function pullMaster(manual) {
       if (manual) masterMsg('サーバーのマスターを確認できませんでした（オフライン、またはサーバーにマスターがありません）。');
       return;
     }
-    const supplyNew = await pullSupply(meta);
+    const supplyNew = (await pullSupply(meta)) | (await pullFormulary(meta));
     if (Master.meta?.server === meta.version) {
       if (manual) masterMsg(`最新です（マスター ${meta.date}・${Number(meta.count).toLocaleString()}品目／供給状況 ${Supply.meta?.asof || '未取得'}）。`);
       else if (supplyNew) refresh();
@@ -1863,7 +1984,9 @@ function buildReport() {
     for (const g of [...groups.values()].sort(cmpKey)) {
       for (const d of g.drugs) {
         n++; numberOf.set(d.id, n);
-        out.push(`${circled(n)}${displayName(d)}${d.dose ? ' ' + d.dose : ''}${remainText(d)}`);
+        const alt = altFor(d);
+        out.push(`${circled(n)}${displayName(d)}${d.dose ? ' ' + d.dose : ''}${remainText(d)}${alt && alt.kind !== 'combo' && alt.text ? `（${alt.text}）` : ''}`);
+        if (alt && alt.kind === 'combo') { out.push(alt.head); out.push(`（${alt.text}）`); }
       }
       out.push('・・・・・' + g.label);
       out.push('');
@@ -1900,7 +2023,7 @@ function rowHtml(d) {
     <div class="info">
       <div class="dname">${esc(displayName(d))}</div>
       ${info ? `<div class="sub">${esc(info)}</div>` : ''}
-      ${(packs.length || (Master.ready && !matched(d)) || (supplyOf(d)?.code > 1)) ? `<div class="tags">${Master.ready && !matched(d) ? '<span class="tag warn">マスター未照合</span>' : ''}${supplyOf(d)?.code > 1 ? supplyTag(supplyOf(d)) : ''}${packs.map(p => `<span class="tag">${esc(p.name)} ${esc(packSummary(p) || '包数未入力')}</span>`).join('')}</div>` : ''}
+      ${(packs.length || (Master.ready && !matched(d)) || (supplyOf(d)?.code > 1) || altTag(d)) ? `<div class="tags">${Master.ready && !matched(d) ? '<span class="tag warn">マスター未照合</span>' : ''}${supplyOf(d)?.code > 1 ? supplyTag(supplyOf(d)) : ''}${altTag(d)}${packs.map(p => `<span class="tag">${esc(p.name)} ${esc(packSummary(p) || '包数未入力')}</span>`).join('')}</div>` : ''}
     </div>
     <div class="qty" data-qty="${d.id}">${!t ? '<div class="none">—</div>'
       : isExt(d) ? `<div class="num" style="font-size:15px">${esc(extText(d))}</div><div class="bd">外用</div>`
@@ -2161,6 +2284,7 @@ const PANELS = {
         </div>
 
         ${matchBlock(d)}
+        ${altBlock(d)}
 
         <div class="block">
           <h3>薬品情報（修正できます）</h3>
@@ -2271,6 +2395,11 @@ const PANELS = {
           <p class="muted">厚生労働省の「薬価基準収載品目リスト」と「医療用医薬品供給状況」を、サーバーが平日に自動で取得しています。アプリは開くたびに新しい版を確認し、あれば取得します。GitHubの master-src フォルダにHOTコードマスターやGS1の表を置くと、それも合わせて取り込みます。</p>
           <button class="btn primary" data-act="pullMaster">最新のマスターを取得</button>
         </div>` : ''}
+        ${Form.meta ? `<div class="block">
+          <h3>院内採用薬リスト</h3>
+          <p class="muted">${Number(Form.meta.count).toLocaleString()}品目（${esc(Form.meta.date || '')}）：確定 ${(Form.meta.counts?.ok || 0) + (Form.meta.counts?.fix || 0)}・銘柄あいまい ${Form.meta.counts?.amb || 0}・要確認 ${Form.meta.counts?.check || 0}・該当なし ${Form.meta.counts?.none || 0}</p>
+          <button class="btn" data-act="formReview">要確認の行を直す</button>
+        </div>` : ''}
         <div class="block filepick">
           <h3>ファイルを取り込む（この端末だけに追加）</h3>
           <input type="file" id="masterFile" multiple accept=".csv,.txt,.tsv,.xlsx,.xls,text/csv,text/plain">
@@ -2292,6 +2421,25 @@ const PANELS = {
             ? `<div class="confirm"><p>取り込んだマスターを削除しますか？</p><div class="inline"><button class="btn danger" data-act="clearMasterYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
             : `<button class="btn danger" data-act="clearMasterAsk" ${Master.ready ? '' : 'disabled'}>マスターを削除</button>`}
         </div>`
+    };
+  },
+
+  formReview() {
+    const rows = Form.items.filter(r => ['check', 'none', 'amb'].includes(r.st));
+    const csv = Form.fixes.map(f => `${f.r.includes(',') ? '"' + f.r + '"' : f.r},${f.y},${f.n || ''}`).join('\n');
+    return {
+      title: '採用薬リストの確認',
+      left: `<button class="btn ghost" data-act="masterPanel">‹ 戻る</button>`,
+      body: `
+        <p class="muted">棚表の表記とマスターの照合が怪しい行です。正しい薬をタップしてください。直した内容はこの端末ですぐ使われます。全端末に反映するには、下の「修正表」をGitHubの formulary-fixes.csv に追記してください（Claudeに送ってもらえれば反映します）。</p>
+        ${Form.fixes.length ? `<div class="block"><h3>修正表（${Form.fixes.length}件）</h3>
+          <textarea class="scanbox" id="fixCsv" style="min-height:120px;border-style:solid" readonly>${esc(csv)}</textarea>
+          <button class="btn primary" data-act="copyFix">修正表をコピー</button><p class="muted" id="copyNote" role="status"></p></div>` : ''}
+        ${rows.length ? rows.map((r, i) => `<div class="block">
+          <h3>${esc(r.r)}<small>${{ check: '要確認', none: '該当なし', amb: '銘柄があいまい' }[r.st]}</small></h3>
+          <div class="cands">${(r.c || []).map((c, k) => `<button class="cand" data-act="formFix" data-i="${Form.items.indexOf(r)}" data-k="${k}"><span class="cn">${esc(c[0])}</span><span class="cs">YJ ${esc(c[1])}・一致度 ${c[2]}</span></button>`).join('')}</div>
+          <button class="btn" data-act="formExclude" data-i="${Form.items.indexOf(r)}">薬ではない行として除外</button>
+        </div>`).join('') : '<p class="okline">要確認の行はありません。</p>'}`
     };
   },
 
@@ -2401,6 +2549,30 @@ const gs1Field = (act) => `
     <div class="other"><input id="gs1In" inputmode="numeric" placeholder="(01)14987…" autocomplete="off" autocorrect="off" spellcheck="false">
     <button class="btn" data-act="${act}">特定</button></div>
     <p class="muted" id="gs1Msg" role="status"></p></div>`;
+
+function altTag(d) {
+  const a = altFor(d);
+  if (!a || a.kind === 'same' || a.kind === 'unknown') return '';
+  const t = { brand: '院内：銘柄違い', strength: '院内：規格違い', form: '院内：剤形違い', combo: '院内：合剤', similar: d.altChoice ? '院内：類似薬' : '院内：類似薬を選択', none: '院内：採用なし', manual: '院内：手入力' }[a.kind];
+  return `<span class="tag${a.kind === 'none' || a.needChoice ? ' warn' : ''}">${t}</span>`;
+}
+
+function altBlock(d) {
+  if (!Form.meta) return window.JISHIYAKU_SITE ? `<div class="block"><h3>院内採用</h3><p class="muted">採用薬リストがまだありません。GitHubの formulary-src に棚表を置くと判定できます。</p></div>` : '';
+  const a = altFor(d);
+  if (!a) return '';
+  const LABEL = { same: '採用あり', brand: '銘柄違い（先発／GE）', strength: '規格違い', form: '剤形違い', combo: '合剤', similar: '採用なし（類似薬の候補あり）', none: '採用なし', unknown: '判定できません', manual: '手入力' };
+  return `<div class="block">
+    <h3>院内採用<small>${esc(LABEL[a.kind] || '')}</small></h3>
+    ${a.kind === 'same' ? '<p class="okline">✓ 院内に採用あり（レポートには何も書きません）</p>'
+      : a.kind === 'unknown' ? `<p class="muted">${esc(a.note)}</p>`
+      : `<p class="okline">レポート：${a.head ? esc(a.head) + '<br>' : ''}（${esc(a.text)}）</p>`}
+    ${a.kind === 'similar' ? `<p class="muted">同じ薬効分類の採用薬です。代わりに使うものをタップしてください。</p>
+      <div class="cands">${a.cands.map((c, k) => `<button class="cand" data-act="altPick" data-k="${k}"><span class="cn">${esc(c.label)}</span><span class="cs">${esc(ingOf(c.r.y))}</span></button>`).join('')}</div>
+      ${d.altChoice ? `<button class="btn" data-act="altClear">選んだ類似薬を外す</button>` : ''}` : ''}
+    <div class="field"><label for="f-alt">レポートの記載を手で直す（空欄なら自動）</label><input id="f-alt" data-f="altText" value="${esc(d.altText || '')}" placeholder="例: 院内採用：アムロジピンOD錠5mg"></div>
+  </div>`;
+}
 
 function supplyBlock(s) {
   if (!Supply.meta) return '';
@@ -2612,6 +2784,34 @@ const actions = {
     d.yj = ''; d.matchSim = 0; delete d.gs1;
     save(); refresh();
   },
+
+  // 採用薬リストの修正
+  formReview: () => openPanel({ type: 'formReview' }),
+  formFix: el => {
+    const r = Form.items[+el.dataset.i], c = r?.c?.[+el.dataset.k]; if (!c) return;
+    Form.fixes = Form.fixes.filter(f => f.r !== r.r).concat([{ r: r.r, y: c[1], n: c[0] }]);
+    try { localStorage.setItem('jishiyaku.formfix', JSON.stringify(Form.fixes)); } catch (e) {}
+    r.y = c[1]; r.n = c[0]; r.st = 'fix'; buildFormIndex(); renderPanel();
+  },
+  formExclude: el => {
+    const r = Form.items[+el.dataset.i]; if (!r) return;
+    Form.fixes = Form.fixes.filter(f => f.r !== r.r).concat([{ r: r.r, y: '除外', n: '' }]);
+    try { localStorage.setItem('jishiyaku.formfix', JSON.stringify(Form.fixes)); } catch (e) {}
+    r.st = 'excluded'; buildFormIndex(); renderPanel();
+  },
+  copyFix: () => {
+    const ta = $('#fixCsv'), note = $('#copyNote');
+    try { navigator.clipboard.writeText(ta.value).then(() => { note.textContent = 'コピーしました。'; }).catch(() => { ta.select(); note.textContent = '全文を選択しました。「コピー」を押してください。'; }); }
+    catch (e) { ta.select(); }
+  },
+
+  // 代替薬
+  altPick: el => {
+    const d = findDrug(ui.panel.id).drug, a = altFor(d);
+    const c = a?.cands?.[+el.dataset.k]; if (!c) return;
+    d.altChoice = shortName(c.r.n); save(); refresh();
+  },
+  altClear: () => { const d = findDrug(ui.panel.id).drug; delete d.altChoice; save(); refresh(); },
 
   // GS1バーコード読み取り
   scanGs1Apply: () => {
@@ -2827,7 +3027,11 @@ idbGet('master').then(m => {
   }
   return idbGet('supply');
 }).then(s => {
-  if (s && s.items) { Supply.items = s.items; Supply.meta = s.meta; if (s.codes) Supply.codes = s.codes; renderMain(); if (ui.panel) renderPanel(); }
+  if (s && s.items) { Supply.items = s.items; Supply.meta = s.meta; if (s.codes) Supply.codes = s.codes; }
+  return idbGet('formulary');
+}).then(f => {
+  if (f && f.items) { Form.items = f.items; Form.meta = f.meta; applyLocalFixes(); buildFormIndex(); }
+  renderMain(); if (ui.panel) renderPanel();
   pullMaster(false);   // サーバーに新しいマスター・供給状況があれば取得（GitHub Pages版のみ）
 });
 })();
