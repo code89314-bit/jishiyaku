@@ -692,6 +692,7 @@ function appendScanText(text) {
 const LLM_DEFAULT = { url: 'https://omamori.tail1c9b3e.ts.net:8445', model: 'qwen3.8-flash-next-q2_0', on: false, key: '' };
 function llmCfg() { try { return { ...LLM_DEFAULT, ...JSON.parse(localStorage.getItem('jishiyaku.llm') || '{}') }; } catch (e) { return { ...LLM_DEFAULT }; } }
 function setLlmCfg(c) { try { localStorage.setItem('jishiyaku.llm', JSON.stringify(c)); } catch (e) {} }
+const keyInfo = k => k ? `保存中のキー：${k.slice(0, 4)}…${k.slice(-4)}（${k.length}文字）` : 'キーは保存されていません';
 const llmReady = () => { const c = llmCfg(); return !!(c.on && c.key && c.url); };
 async function llmFetch(path, body, timeoutMs = 180000) {
   const c = llmCfg(), ac = new AbortController(), t = setTimeout(() => ac.abort(), timeoutMs);
@@ -2589,7 +2590,8 @@ const PANELS = {
         <div class="block">
           <div class="field"><label for="llmUrl">サーバのURL</label><input id="llmUrl" data-llm="url" value="${esc(c.url)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
           <div class="field"><label for="llmModel">モデル名</label><input id="llmModel" data-llm="model" value="${esc(c.model)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
-          <div class="field"><label for="llmKey">APIキー（この端末にだけ保存されます）</label><input id="llmKey" data-llm="key" type="password" value="${esc(c.key)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <div class="field"><label for="llmKey">APIキー（この端末にだけ保存されます）</label><input id="llmKey" data-llm="key" type="password" value="${esc(c.key)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+          <p class="muted" id="llmKeyInfo">${esc(keyInfo(c.key))}</p>
           <button class="btn primary" data-act="llmTest">接続を確認</button>
           <p class="muted" id="llmMsg" role="status">${esc(p.msg || '')}</p>
         </div>
@@ -3089,7 +3091,17 @@ document.addEventListener('input', e => {
   if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
   if (t.id === 'reportText') { ui.panel.text = t.value; return; }
   if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
-  if (t.dataset.llm) { const c = llmCfg(); c[t.dataset.llm] = t.value.trim(); setLlmCfg(c); return; }
+  if (t.dataset.llm) {
+    const c = llmCfg();
+    let v = t.value.trim();
+    if (t.dataset.llm === 'key') {
+      // 貼り付け時に紛れ込む空白・改行・ゼロ幅文字や「API key:」のような見出しを取り除く
+      v = v.replace(/[\s\u200B-\u200D\uFEFF\u00A0]/g, '').replace(/^(?:api[_-]?key|key|apikey)[:：=]/i, '');
+    }
+    c[t.dataset.llm] = v; setLlmCfg(c);
+    if (t.dataset.llm === 'key') { const k = $('#llmKeyInfo'); if (k) k.textContent = keyInfo(v); }
+    return;
+  }
   if (t.id === 'mSearch' || t.id === 'addSearch') {
     const q = t.value.trim();
     ui.panel.cands = q ? searchMaster(q, 8, true) : null;
