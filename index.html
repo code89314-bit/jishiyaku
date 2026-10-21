@@ -686,9 +686,103 @@ function appendScanText(text) {
   if (ta) { ta.value = ui.scanText; ta.scrollTop = ta.scrollHeight; }
 }
 
+/* ---- 自前LLMサーバ（Tailscale経由・OpenAI互換）で手帳を読む ----
+   APIキーはこの端末にだけ保存する（公開リポジトリには入れない）。
+   LLMの出力はそのまま確定せず、薬品名はマスターと照合してから使う。 */
+const LLM_DEFAULT = { url: 'https://omamori.tail1c9b3e.ts.net:8445', model: 'qwen3.8-flash-next-q2_0', on: false, key: '' };
+function llmCfg() { try { return { ...LLM_DEFAULT, ...JSON.parse(localStorage.getItem('jishiyaku.llm') || '{}') }; } catch (e) { return { ...LLM_DEFAULT }; } }
+function setLlmCfg(c) { try { localStorage.setItem('jishiyaku.llm', JSON.stringify(c)); } catch (e) {} }
+const llmReady = () => { const c = llmCfg(); return !!(c.on && c.key && c.url); };
+async function llmFetch(path, body, timeoutMs = 180000) {
+  const c = llmCfg(), ac = new AbortController(), t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(c.url.replace(/\/$/, '') + path, {
+      method: body ? 'POST' : 'GET', signal: ac.signal,
+      headers: { Authorization: 'Bearer ' + c.key, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    if (!r.ok) throw new Error(`サーバの応答 ${r.status}：${(await r.text()).slice(0, 160)}`);
+    return await r.json();
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('時間切れ（180秒）');
+    if (e instanceof TypeError) throw new Error('サーバにつながりません（Tailscaleの接続、サーバの起動状態を確認してください）');
+    throw e;
+  } finally { clearTimeout(t); }
+}
+const LLM_SYSTEM = `あなたは病院薬剤部で持参薬鑑別を補助しています。お薬手帳の写真から、印字されている処方内容を書き写し、JSONだけを返してください。
+規則：
+- 書かれていない情報を推測で補わない。読めない文字は「?」にする。
+- 半角カタカナは全角に直す。
+- name は印字どおりの薬品名（規格・メーカー名の「」も含める）。行頭の番号や記号（[1]、◇、(内)、(外) など）は除く。
+- 「一般名」「【般】」で書かれた処方箋記載名は generic に入れる（name には入れない）。
+- dose は薬品名の右側などに書かれた量（例：1錠、6錠、1.02g、7枚、60mL）。「1回◯錠」の記載は perDose に入れる。
+- usage は用法（例：1日3回 毎食後、疼痛時、1日2回 患部に塗布）。部位の指定があれば usage に含める。
+- 同じ用法が複数の薬にまとめて書かれている場合は、それぞれの薬に同じ usage と days を入れる。
+- days は日数・回数（例：14日分、10回分、1調剤）。
+- シール（処方）ごとに、医療機関名と調剤日を分けて出力する。患者名・住所・電話番号・薬剤師名は出力しない。
+- 効能・注意書き・手書きのメモは出力しない。
+出力形式：{"prescriptions":[{"institution":"","date":"","drugs":[{"name":"","generic":"","dose":"","perDose":"","usage":"","days":""}]}]}`;
+async function toJpegDataURL(src, maxSide = 2000) {
+  let bmp = src;
+  if (!(src instanceof HTMLCanvasElement)) {
+    try { bmp = await createImageBitmap(src, { imageOrientation: 'from-image' }); }
+    catch (e) { bmp = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = URL.createObjectURL(src); }); }
+  }
+  const W = bmp.width || bmp.naturalWidth, H = bmp.height || bmp.naturalHeight, sc = Math.min(1, maxSide / Math.max(W, H));
+  const c = document.createElement('canvas'); c.width = Math.round(W * sc); c.height = Math.round(H * sc);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.88);
+}
+async function llmReadImage(src) {
+  const c = llmCfg();
+  const url = await toJpegDataURL(src);
+  const r = await llmFetch('/v1/chat/completions', {
+    model: c.model, temperature: 0, max_tokens: 2500,
+    response_format: { type: 'json_object' },
+    chat_template_kwargs: { enable_thinking: false },
+    experimental_speed_projection: false,
+    messages: [
+      { role: 'system', content: LLM_SYSTEM },
+      { role: 'user', content: [{ type: 'text', text: 'このお薬手帳の処方内容をJSONで書き出してください。' }, { type: 'image_url', image_url: { url } }] }
+    ]
+  });
+  const txt = r?.choices?.[0]?.message?.content || '';
+  const m = txt.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('LLMの返答がJSONではありません');
+  return JSON.parse(m[0]);
+}
+// LLMのJSON → 医療機関と薬（薬品名はマスターと照合）
+function llmToClinics(j) {
+  const clinics = [];
+  const list = Array.isArray(j?.prescriptions) ? j.prescriptions : (Array.isArray(j?.drugs) ? [j] : []);
+  for (const p of list) {
+    const name = normalize(p.institution || '').replace(/[?？]/g, '').trim() || '医療機関不明';
+    let c = clinics.find(x => x.name === name);
+    if (!c) { c = { id: uid(), name, drugs: [] }; clinics.push(c); }
+    for (const x of p.drugs || []) {
+      const nm = normalize(String(x.name || '')).trim();
+      if (!nm || /^[?？\s]+$/.test(nm)) continue;
+      const usage = [x.usage, x.days].map(v => normalize(String(v || '')).trim()).filter(Boolean).join(' ');
+      const d = newDrug(cleanName(nm), normalize(String(x.dose || x.perDose || '')).trim(), usage);
+      if (x.generic) d.rxName = normalize(String(x.generic)).trim();
+      if (x.perDose && x.dose) d.note = '1回' + normalize(String(x.perDose)).replace(/^1回/, '');
+      d.src = 'llm'; d.rawName = nm;
+      if (Master.ready) {
+        const top = searchMaster(nm, 3, true);
+        if (top[0] && top[0].sim >= 0.9 && (!top[1] || top[0].sim - top[1].sim >= 0.03)) applyMaster(d, top[0], top[0].sim);
+        else if (top.length) d.cands = top;
+      }
+      c.drugs.push(d);
+    }
+  }
+  return clinics.filter(c => c.drugs.length);
+}
+
 function ocrImage(src) {
   OCR.pending++;
   ocrStatus(`読み取り待ち（${OCR.pending}枚）`, 0);
+  // LLMサーバは端末内OCRと並行して呼ぶ（30秒前後かかる）
+  const llmJob = llmReady() ? llmReadImage(src).then(j => ({ j }), e => ({ err: e.message || String(e) })) : null;
   OCR.queue = OCR.queue.then(async () => {
     try {
       const canvas = await prepareImage(src);
@@ -711,13 +805,20 @@ function ocrImage(src) {
         for (const b of r2.data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || [])
           wide.push({ bbox: { x0: l.bbox.x0 / 2, x1: l.bbox.x1 / 2, y0: l.bbox.y0, y1: l.bbox.y1 }, words: (l.words || []).map(x => ({ text: x.text, bbox: { x0: x.bbox.x0 / 2, x1: x.bbox.x1 / 2, y0: x.bbox.y0, y1: x.bbox.y1 } })) });
       }
+      let llm = null, llmErr = '';
+      if (llmJob) {
+        ocrStatus('LLMサーバで読み取り中…（30秒ほどかかります）', 0.9);
+        const r = await llmJob;
+        if (r.j) llm = r.j; else llmErr = r.err;
+      }
       OCR.pages++;
       appendScanText(text);
-      ui.scanPages = [...(ui.scanPages || []), { text, lines, wide }];
+      ui.scanPages = [...(ui.scanPages || []), { text, lines, wide, llm, llmErr }];
       try { window.__jishiyakuOcr = ui.scanPages; } catch (e) {}
       ui.scanPagesText = ui.scanText;
       OCR.pending--;
-      ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `${OCR.pages}ページ読み取りました。内容を確認して「解析する」を押してください。`, 1);
+      const llmNote = llmJob ? (llm ? '（LLMで読み取り）' : `（LLMは使えませんでした：${llmErr}。端末内のOCRで読み取りました）`) : '';
+      ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `${OCR.pages}ページ読み取りました${llmNote}。内容を確認して「解析する」を押してください。`, 1);
     } catch (err) {
       OCR.pending--;
       console.error(err);
@@ -2206,6 +2307,7 @@ const PANELS = {
               <div class="rv-pair"><span>用量</span><input class="txt" data-rv="${ci}|${di}|dose" value="${esc(d.dose)}" placeholder="例: 1錠"></div>
               <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
               ${d.rxName ? `<div class="rv-badge">処方名：${esc(d.rxName)}</div>` : ''}
+              ${d.src === 'llm' ? `<div class="rv-badge">LLMで読み取り${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>` : ''}
               ${usageBadge(d.usage)}
             </div>`).join('')}
           <button class="btn" data-act="rvAddDrug" data-i="${ci}">＋ 薬品を追加</button>
@@ -2472,6 +2574,29 @@ const PANELS = {
     };
   },
 
+  llm() {
+    const c = llmCfg(), p = ui.panel;
+    return {
+      title: 'LLMサーバ',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>お薬手帳の読み取りにLLMを使う</h3>
+          <label class="pick" style="border:0"><input type="checkbox" id="llmOn" ${c.on ? 'checked' : ''} style="width:22px;height:22px"> <span>有効にする</span></label>
+          <p class="muted">有効にすると、手帳の写真をこの端末の読み取りと並行して自前のLLMサーバに送ります（Tailscale経由・HTTPS）。つながらないときは、端末内の読み取りだけで動きます。読んだ薬品名は必ずマスターと照合してから使います。</p>
+          <p class="warnline">写真には患者情報が含まれます。送り先は下のサーバだけです。</p>
+        </div>
+        <div class="block">
+          <div class="field"><label for="llmUrl">サーバのURL</label><input id="llmUrl" data-llm="url" value="${esc(c.url)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <div class="field"><label for="llmModel">モデル名</label><input id="llmModel" data-llm="model" value="${esc(c.model)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <div class="field"><label for="llmKey">APIキー（この端末にだけ保存されます）</label><input id="llmKey" data-llm="key" type="password" value="${esc(c.key)}" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <button class="btn primary" data-act="llmTest">接続を確認</button>
+          <p class="muted" id="llmMsg" role="status">${esc(p.msg || '')}</p>
+        </div>
+        <p class="muted">iPhoneでTailscaleアプリを接続しておく必要があります。サーバが画像生成モードに切り替わっている間は使えません。</p>`
+    };
+  },
+
   sessions() {
     const p = ui.panel;
     const others = sessions.filter(s => s.id !== ui.sid);
@@ -2516,6 +2641,7 @@ const PANELS = {
         <div class="menu-list">
           <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
           <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
+          ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="llmPanel">LLMサーバ（${llmReady() ? '有効' : '無効'}）</button>` : ''}
           <button class="btn" data-act="masterPanel">医薬品マスター（${Master.ready ? Master.items.length.toLocaleString() + '品目' : '未取り込み'}）</button>
           <button class="btn" data-act="scanFromMenu">お薬手帳を読み取る</button>
           <button class="btn" data-act="report">鑑別レポートを作成</button>
@@ -2627,7 +2753,15 @@ function openHeat(id) { touch(id); save(); openPanel({ type: 'heat', id }); }
 function makeReview(text) {
   // 写真から読んだままなら座標を使って読み解く。手で直した・貼り付けた場合は文字だけで読む
   let clinics = [];
-  if (ui.scanPages?.length && ui.scanPagesText === ui.scanText) clinics = parseLayout(ui.scanPages);
+  if (ui.scanPages?.length && ui.scanPagesText === ui.scanText) {
+    for (const pg of ui.scanPages) {
+      const part = pg.llm ? llmToClinics(pg.llm) : [];
+      for (const c of (part.length ? part : parseLayout([pg]))) {
+        const t = clinics.find(x => x.name === c.name && c.name !== '医療機関不明');
+        if (t) t.drugs.push(...c.drugs); else clinics.push(c);
+      }
+    }
+  }
   if (!clinics.length) clinics = parse(text);
   for (const c of clinics) for (const d of c.drugs) autoMatch(d);
   return { clinics, raw: text };
@@ -2858,6 +2992,16 @@ const actions = {
 
   // マスター
   masterPanel: () => openPanel({ type: 'master' }),
+  llmPanel: () => openPanel({ type: 'llm' }),
+  llmTest: async () => {
+    const msg = t => { ui.panel.msg = t; const m = $('#llmMsg'); if (m) m.textContent = t; };
+    msg('確認中…');
+    try {
+      const r = await llmFetch('/v1/models', null, 20000);
+      const ms = (r.data || []).map(m => m.id + ((m.input_modalities || []).includes('image') ? '（画像可）' : '（画像不可）'));
+      msg('接続できました：' + (ms.join('、') || 'モデル一覧なし'));
+    } catch (e) { msg('接続できません：' + (e.message || e)); }
+  },
   pullMaster: () => { masterMsg('確認中…'); pullMaster(true); },
   rematch: () => { const n = rematchAll(); ui.panel.msg = `${n}品目を照合しました。残りは数量入力画面の候補から選んでください。`; refresh(); },
   clearMasterAsk: () => { ui.panel.confirm = 'clearMaster'; renderPanel(); },
@@ -2945,6 +3089,7 @@ document.addEventListener('input', e => {
   if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
   if (t.id === 'reportText') { ui.panel.text = t.value; return; }
   if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
+  if (t.dataset.llm) { const c = llmCfg(); c[t.dataset.llm] = t.value.trim(); setLlmCfg(c); return; }
   if (t.id === 'mSearch' || t.id === 'addSearch') {
     const q = t.value.trim();
     ui.panel.cands = q ? searchMaster(q, 8, true) : null;
@@ -2977,6 +3122,7 @@ document.addEventListener('input', e => {
   }
 });
 document.addEventListener('change', async e => {
+  if (e.target.id === 'llmOn') { const c = llmCfg(); c.on = e.target.checked; setLlmCfg(c); return; }
   if (e.target.id === 'ocrFile' && e.target.files.length) {
     const files = [...e.target.files];
     e.target.value = '';
