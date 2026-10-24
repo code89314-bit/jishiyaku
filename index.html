@@ -782,7 +782,8 @@ function llmToClinics(j) {
     let c = clinics.find(x => x.name === name);
     if (!c) { c = { id: uid(), name, drugs: [] }; clinics.push(c); }
     for (const x of p.drugs || []) {
-      const nm = normalize(String(x.name || '')).trim();
+      // 名前の後ろにくっついた量（「 3錠」など）は外す
+      const nm = normalize(String(x.name || '')).trim().replace(/\s+\d+(?:\.\d+)?\s*(?:錠|カプセル|包|g|mL|枚|本|個|瓶)\s*$/, '');
       if (!nm || /^[?？\s]+$/.test(nm)) continue;
       const S = v => normalize(String(v ?? '')).trim();
       const usage = [x.usageText || x.usage, x.days].map(S).filter(Boolean).join(' ');
@@ -791,7 +792,7 @@ function llmToClinics(j) {
       if (x.perDay !== undefined || x.times || x.meal || x.prn || x.ext) d.u = uFromLLM(x);   // 構造化された用法
       d.src = 'llm'; d.rawName = nm;
       if (Master.ready) {
-        const top = searchMaster(nm, 3, true);
+        const top = searchMaster(nm, 6, true);
         if (top[0] && top[0].sim >= 0.9 && (!top[1] || top[0].sim - top[1].sim >= 0.03)) applyMaster(d, top[0], top[0].sim);
         else if (top.length) d.cands = top;
       }
@@ -1523,6 +1524,7 @@ function normName(s) {
   return toKata((s || '').normalize('NFKC'))
     .replace(/【般】|\[般\]|\(般\)/g, '')
     .replace(/[\s・「」『』"'“”]/g, '')
+    .replace(/(?<=\d)[OoＯ〇](?=[\dOo〇]*\s*(?:mg|MG|g|%|μg))/g, '0').replace(/(?<=\d)[OoＯ〇](?=\d)/g, '0')
     .replace(/[パピプペポ一－‐\-口力工夕卜]/g, c => FOLD[c] || c)
     .replace(/ナトリウム/g, 'NA').replace(/カリウム/g, 'K').replace(/カルシウム/g, 'CA').replace(/マグネシウム/g, 'MG')
     .toUpperCase();
@@ -1649,6 +1651,9 @@ function searchMaster(q, k = 6, loose = false) {
   touched.sort((x, y) => dice(y) - dice(x) || score[y] - score[x]);
   const nb = seen.size || 1;
   const nums = s.match(/\d+(\.\d+)?/g) || [];
+  // メーカー名（「サワイ」(サワイ) など）を取り出して、候補のメーカー名と比べる
+  const makerOf = n => { const m = (n || '').normalize('NFKC').match(/[「｢(（]([^」｣)）]+)[」｣)）]?\s*$/); return m ? normName(m[1]) : ''; };
+  const qMaker = makerOf(q);
   const res = touched.slice(0, 400).map(id => {
     const t = Master.norm[id];
     let sim = 1 - lev(s, t) / Math.max(s.length, t.length);
@@ -1657,7 +1662,13 @@ function searchMaster(q, k = 6, loose = false) {
     if (loose) sim = Math.max(sim, 0.9 * (score[id] / nb) - 0.1 * Math.max(0, t.length - s.length) / t.length);
     // 規格の数字（5 と 2.5 など）は完全一致を重視
     for (const num of nums) if (!new RegExp(`(^|[^\\d.])${num.replace('.', '\\.')}(?![\\d.])`).test(t)) sim -= 0.15;
-    return { id, sim };
+    if (qMaker) {
+      const cm = makerOf(Master.items[id].n);
+      if (cm && cm === qMaker) sim += 0.06;
+      else if (cm && lev(cm, qMaker) <= 1 && qMaker.length >= 3) sim += 0.03;
+      else if (cm) sim -= 0.02;
+    }
+    return { id, sim: Math.min(1, sim) };
   }).sort((a, b) => b.sim - a.sim);
   const out = [], names = new Set();
   for (const r of res) {
@@ -2375,7 +2386,8 @@ const PANELS = {
               ${Master.ready ? (matched(d)
                 ? `<div class="rv-badge ok">✓ マスター照合 ${Math.round((d.matchSim || 1) * 100)}%${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>`
                 : `<div class="rv-badge ng">マスター未照合：候補をタップしてください</div>
-                   <div class="cands">${(d.cands?.length ? d.cands : searchMaster(d.rawName || d.name, 3, true)).map((c, k) => `<button class="cand" data-act="rvPick" data-i="${ci}" data-j="${di}" data-k="${k}"><span class="cn">${esc(c.n)}</span><span class="cs">一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`) : ''}
+                   ${!d.showAll ? `<button class="btn ghost" data-act="rvAll" data-i="${ci}" data-j="${di}">同じ成分・規格の製品をすべて表示</button>` : ''}
+                   <div class="cands">${rvCands(d).map((c, k) => `<button class="cand" data-act="rvPick" data-i="${ci}" data-j="${di}" data-k="${k}"><span class="cn">${esc(c.n)}</span><span class="cs">一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`) : ''}
               <div class="rv-pair"><span>用量</span><input class="txt" data-rv="${ci}|${di}|dose" value="${esc(d.dose)}" placeholder="例: 1錠"></div>
               <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
               ${d.rxName ? `<div class="rv-badge">処方名：${esc(d.rxName)}</div>` : ''}
@@ -2729,6 +2741,14 @@ const PANELS = {
   }
 };
 
+// 確認画面の候補：上位6件。同じ成分・規格（YJ先頭9桁）の製品をまとめて広げられる
+function rvCands(d) {
+  const base = d.cands?.length ? d.cands : searchMaster(d.rawName || d.name, 6, true);
+  if (!d.showAll || !base[0]?.y) return base;
+  const y9 = base[0].y.slice(0, 9), seen = new Set(base.map(c => c.n));
+  const more = Master.items.filter(it => it.y && it.y.slice(0, 9) === y9 && !seen.has(it.n)).map(it => ({ n: it.n, y: it.y, sim: 0 }));
+  return [...base, ...more];
+}
 function usageBadgeD(d) {
   const u = getU(d), e = evalU(u, d.dose);
   if (e.empty) return d.usage ? `<div class="rv-badge ng">用法を読み取れません（数量入力画面の用法フォームで入れてください）</div>` : '';
@@ -2923,9 +2943,10 @@ const actions = {
     openPanel({ type: 'review', review: makeReview(text) });
   },
   backToScan: () => openPanel({ type: 'scan' }),
+  rvAll: el => { ui.panel.review.clinics[+el.dataset.i].drugs[+el.dataset.j].showAll = true; renderPanel(); },
   rvPick: el => {
     const d = ui.panel.review.clinics[+el.dataset.i].drugs[+el.dataset.j];
-    const c = (d.cands?.length ? d.cands : searchMaster(d.rawName || d.name, 3, true))[+el.dataset.k];
+    const c = rvCands(d)[+el.dataset.k];
     if (c) { applyMaster(d, c, Math.max(c.sim, 0.99)); renderPanel(); }
   },
   rvDelClinic: el => { ui.panel.review.clinics.splice(+el.dataset.i, 1); renderPanel(); },
