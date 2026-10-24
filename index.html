@@ -1524,7 +1524,7 @@ function normName(s) {
   return toKata((s || '').normalize('NFKC'))
     .replace(/【般】|\[般\]|\(般\)/g, '')
     .replace(/[\s・「」『』"'“”]/g, '')
-    .replace(/(?<=\d)[OoＯ〇](?=[\dOo〇]*\s*(?:mg|MG|g|%|μg))/g, '0').replace(/(?<=\d)[OoＯ〇](?=\d)/g, '0')
+    .replace(/\d[\dOoＯ〇]*(?=\s*(?:mg|MG|g|%|μg|mL))/g, m => m.replace(/[OoＯ〇]/g, '0'))
     .replace(/[パピプペポ一－‐\-口力工夕卜]/g, c => FOLD[c] || c)
     .replace(/ナトリウム/g, 'NA').replace(/カリウム/g, 'K').replace(/カルシウム/g, 'CA').replace(/マグネシウム/g, 'MG')
     .toUpperCase();
@@ -1579,7 +1579,12 @@ function searchSkeleton(sk, strengths, k = 3) {
   return out;
 }
 
+const MK = /[「｢(（]([^」｣)）]+)[」｣)）]?\s*$/;
+const makerOf = n => { const m = (n || '').normalize('NFKC').match(MK); return m ? normName(m[1]) : ''; };
+const baseOf = n => normName((n || '').normalize('NFKC').replace(MK, ''));
 function buildIndex() {
+  Master.mk = Master.items.map(it => makerOf(it.n));
+  Master.base = Master.items.map((it, i) => Master.mk[i] ? baseOf(it.n) : '');
   Master.skel = Master.items.map(it => kanaSkeleton(it.n));
   Master.norm = Master.items.map(it => normName(it.n));
   const idx = new Map();
@@ -1652,8 +1657,7 @@ function searchMaster(q, k = 6, loose = false) {
   const nb = seen.size || 1;
   const nums = s.match(/\d+(\.\d+)?/g) || [];
   // メーカー名（「サワイ」(サワイ) など）を取り出して、候補のメーカー名と比べる
-  const makerOf = n => { const m = (n || '').normalize('NFKC').match(/[「｢(（]([^」｣)）]+)[」｣)）]?\s*$/); return m ? normName(m[1]) : ''; };
-  const qMaker = makerOf(q);
+  const qMaker = makerOf(q), qBase = qMaker ? baseOf(q) : '';
   const res = touched.slice(0, 400).map(id => {
     const t = Master.norm[id];
     let sim = 1 - lev(s, t) / Math.max(s.length, t.length);
@@ -1662,11 +1666,15 @@ function searchMaster(q, k = 6, loose = false) {
     if (loose) sim = Math.max(sim, 0.9 * (score[id] / nb) - 0.1 * Math.max(0, t.length - s.length) / t.length);
     // 規格の数字（5 と 2.5 など）は完全一致を重視
     for (const num of nums) if (!new RegExp(`(^|[^\\d.])${num.replace('.', '\\.')}(?![\\d.])`).test(t)) sim -= 0.15;
-    if (qMaker) {
-      const cm = makerOf(Master.items[id].n);
-      if (cm && cm === qMaker) sim += 0.06;
-      else if (cm && lev(cm, qMaker) <= 1 && qMaker.length >= 3) sim += 0.03;
-      else if (cm) sim -= 0.02;
+    // 両方にメーカー名があるときは、名前・規格の部分を主に（88%）、メーカー名を従に（12%）比べる
+    const cm = Master.mk[id];
+    if (qMaker && cm) {
+      const tb = Master.base[id];
+      const sb = 1 - lev(qBase, tb) / Math.max(qBase.length, tb.length, 1);
+      const sm = 1 - lev(qMaker, cm) / Math.max(qMaker.length, cm.length, 1);
+      let s2 = 0.88 * sb + 0.12 * sm;
+      for (const num of nums) if (!new RegExp(`(^|[^\\d.])${num.replace('.', '\\.')}(?![\\d.])`).test(tb)) s2 -= 0.15;
+      sim = Math.max(loose ? sim - 0.1 : 0, s2);
     }
     return { id, sim: Math.min(1, sim) };
   }).sort((a, b) => b.sim - a.sim);
