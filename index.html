@@ -737,6 +737,7 @@ async function toJpegDataURL(src, maxSide = 2000) {
 async function llmReadImage(src) {
   const c = llmCfg();
   const url = await toJpegDataURL(src);
+  const t0 = Date.now();
   const r = await llmFetch('/v1/chat/completions', {
     model: c.model, temperature: 0, max_tokens: 2500,
     response_format: { type: 'json_object' },
@@ -746,6 +747,16 @@ async function llmReadImage(src) {
       { role: 'system', content: LLM_SYSTEM },
       { role: 'user', content: [{ type: 'text', text: 'このお薬手帳の処方内容をJSONで書き出してください。' }, { type: 'image_url', image_url: { url } }] }
     ]
+  }).catch(async e => {
+    // 「つながらない」場合、サーバ自体に届くかを確かめて原因を絞る
+    if (!/つながりません/.test(e.message)) throw e;
+    const sec = Math.round((Date.now() - t0) / 1000);
+    const kb = Math.round(url.length * 0.75 / 1024);
+    let reach = false;
+    try { await llmFetch('/v1/models', null, 15000); reach = true; } catch (e2) {}
+    throw new Error(reach
+      ? `サーバには届きますが、画像の処理中に通信が切れました（${sec}秒後・画像${kb}KB）。サーバ側でエラーが起きた可能性があります（エラーの応答にCORSの許可が付いていないと、この表示になります）`
+      : `サーバにつながりません（${sec}秒後）。Tailscaleの接続、サーバの起動状態、iPhoneが読み取り中にスリープしたり別のアプリに切り替わったりしていないかを確認してください`);
   });
   const txt = r?.choices?.[0]?.message?.content || '';
   const m = txt.match(/\{[\s\S]*\}/);
