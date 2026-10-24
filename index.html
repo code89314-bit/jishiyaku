@@ -730,9 +730,11 @@ const LLM_SYSTEM = `あなたは病院薬剤部で持参薬鑑別を補助して
   - days：日数・回数（例："14日分"、"10回分"、"1調剤"）。
   - usageText：用法の原文（印字どおり）。
 - 計算で補わない（書かれていない1日量を回数から計算するなど）。
-- シール（処方）ごとに、医療機関名と調剤日を分けて出力する。患者名・住所・電話番号・薬剤師名は出力しない。
+- シール（処方）ごとに、医療機関名と調剤日を分けて出力する。institution は処方した医療機関（病院・医院・クリニック・診療所）。
+- 薬局（〇〇薬局、調剤薬局、ファーマシーなど）は医療機関ではない。institution に入れず、pharmacy に入れる。医療機関名が書かれていなければ institution は ""。
+- 患者名・住所・電話番号・薬剤師名は出力しない。
 - 効能・注意書き・手書きのメモは出力しない。
-出力形式：{"prescriptions":[{"institution":"","date":"","drugs":[{"name":"","generic":"","dailyDose":"","perDose":"","perDay":0,"times":[],"meal":"","frequency":"","prn":"","ext":"","site":"","unequal":"","days":"","usageText":""}]}]}`;
+出力形式：{"prescriptions":[{"institution":"","pharmacy":"","date":"","drugs":[{"name":"","generic":"","dailyDose":"","perDose":"","perDay":0,"times":[],"meal":"","frequency":"","prn":"","ext":"","site":"","unequal":"","days":"","usageText":""}]}]}`;
 async function toJpegDataURL(src, maxSide = 2000) {
   let bmp = src;
   if (!(src instanceof HTMLCanvasElement)) {
@@ -778,7 +780,9 @@ function llmToClinics(j) {
   const clinics = [];
   const list = Array.isArray(j?.prescriptions) ? j.prescriptions : (Array.isArray(j?.drugs) ? [j] : []);
   for (const p of list) {
-    const name = normalize(p.institution || '').replace(/[?？]/g, '').trim() || '医療機関不明';
+    let name = normalize(p.institution || '').replace(/[?？]/g, '').trim();
+    if (PHARM.test(name) && !CLINIC.test(name.replace(PHARM, ''))) name = '';   // 薬局名は医療機関にしない
+    name = name || '医療機関不明';
     let c = clinics.find(x => x.name === name);
     if (!c) { c = { id: uid(), name, drugs: [] }; clinics.push(c); }
     for (const x of p.drugs || []) {
@@ -2268,7 +2272,7 @@ function renderMain() {
       const ds = c.drugs.filter(matches);
       if (!ds.length) continue;
       shown += ds.length;
-      html += `<section class="clinic"><h2>${esc(c.name)}</h2><div class="card">${ds.map(rowHtml).join('')}</div></section>`;
+      html += `<section class="clinic"><h2 data-act="clinicEdit" data-id="${c.id}" role="button" tabindex="0" style="cursor:pointer">${esc(c.name)} <span class="muted" style="font-weight:400;font-size:12px">編集</span></h2><div class="card">${ds.map(rowHtml).join('')}</div></section>`;
     }
     if (!shown) html += `<p class="muted">「${esc(ui.search)}」に一致する薬はありません。</p>`;
     if (!ui.packMode) html += `<div style="display:grid;gap:10px">
@@ -2385,12 +2389,21 @@ const PANELS = {
             <input class="txt" data-rv="${ci}|-1|name" value="${esc(c.name)}" placeholder="医療機関名" aria-label="医療機関名">
             <button class="x" data-act="rvDelClinic" data-i="${ci}" aria-label="医療機関を削除">✕</button>
           </div>
+          ${ui.panel.delClinic === ci ? `<div class="confirm">
+            <p>「${esc(c.name || '（名前なし）')}」を消します。この医療機関の薬（${c.drugs.length}品目）はどうしますか？</p>
+            <div class="inline">
+              ${rv.clinics.map((o, oi) => oi === ci ? '' : `<button class="btn" data-act="rvMergeClinic" data-i="${ci}" data-to="${oi}">「${esc(o.name || '（名前なし）')}」にまとめる</button>`).join('')}
+              <button class="btn" data-act="rvUnknownClinic" data-i="${ci}">医療機関不明にする</button>
+              <button class="btn danger" data-act="rvDelClinicAll" data-i="${ci}">薬ごと削除</button>
+              <button class="btn" data-act="rvDelCancel">やめる</button>
+            </div></div>` : ''}
           ${c.drugs.map((d, di) => `
             <div class="rv-drug">
               <div class="rv-top">
                 <input class="txt" data-rv="${ci}|${di}|name" value="${esc(d.name)}" placeholder="薬品名" aria-label="薬品名">
                 <button class="x" data-act="rvDelDrug" data-i="${ci}" data-j="${di}" aria-label="薬品を削除">✕</button>
               </div>
+              ${rv.clinics.length > 1 ? `<div class="rv-pair"><span>医療機関</span><select class="txt" data-rvmove="${ci}|${di}" aria-label="医療機関を変更">${rv.clinics.map((o, oi) => `<option value="${oi}" ${oi === ci ? 'selected' : ''}>${esc(o.name || '（名前なし）')}</option>`).join('')}</select></div>` : ''}
               ${Master.ready ? (matched(d)
                 ? `<div class="rv-badge ok">✓ マスター照合 ${Math.round((d.matchSim || 1) * 100)}%${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>`
                 : `<div class="rv-badge ng">マスター未照合：候補をタップしてください</div>
@@ -2487,6 +2500,7 @@ const PANELS = {
           ${d.rxName ? `<div class="field"><label for="f-rx">処方箋記載名</label><input id="f-rx" data-f="rxName" value="${esc(d.rxName)}"></div>` : ''}
           <div class="field"><label for="f-usage">用法（読み取った原文）</label><textarea id="f-usage" data-f="usage" rows="2">${esc(d.usage)}</textarea></div>
           ${d.u ? '' : `<button class="btn" data-act="uReparse">原文から用法フォームを作り直す</button>`}
+          ${state.clinics.length > 1 ? `<div class="field"><label>医療機関を変更</label><div class="sizes">${state.clinics.map(c => `<button class="seg${c.id === r.clinic.id ? ' on' : ''}" data-act="drugMove" data-to="${c.id}" style="padding:0 10px">${esc(c.name)}</button>`).join('')}</div></div>` : ''}
           <button class="btn" data-act="toggleExt">${isExt(d) ? '内服薬として扱う（シート・錠数で数える）' : '外用薬として扱う（本数で数える）'}</button>
           ${confirm
             ? `<div class="confirm"><p>この薬を一覧から削除しますか？</p><div class="inline"><button class="btn danger" data-act="delDrugYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
@@ -2613,6 +2627,27 @@ const PANELS = {
           ${confirm
             ? `<div class="confirm"><p>取り込んだマスターを削除しますか？</p><div class="inline"><button class="btn danger" data-act="clearMasterYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
             : `<button class="btn danger" data-act="clearMasterAsk" ${Master.ready ? '' : 'disabled'}>マスターを削除</button>`}
+        </div>`
+    };
+  },
+
+  clinic() {
+    const c = state.clinics.find(x => x.id === ui.panel.id);
+    if (!c) return { title: '医療機関', left: `<button class="btn ghost" data-act="close">閉じる</button>`, body: '<p class="muted">見つかりません。</p>' };
+    const others = state.clinics.filter(x => x.id !== c.id);
+    return {
+      title: '医療機関の編集',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <div class="field"><label for="cName">医療機関名</label><input id="cName" value="${esc(c.name)}" autocomplete="off"></div>
+          <button class="btn primary" data-act="clinicRename">名前を変更</button>
+          <p class="muted">薬局の名前などが医療機関として入ってしまった場合は、正しい医療機関名に直すか、下の「まとめる」を使ってください。薬は消えません。</p>
+        </div>
+        <div class="block">
+          <h3>この医療機関の薬（${c.drugs.length}品目）を別の医療機関にまとめる</h3>
+          <div class="inline">${others.map(o => `<button class="btn" data-act="clinicMerge" data-to="${o.id}">「${esc(o.name)}」へ</button>`).join('') || '<span class="muted">ほかの医療機関はありません</span>'}
+            ${c.name !== '医療機関不明' ? `<button class="btn" data-act="clinicMerge" data-to="__unknown">医療機関不明へ</button>` : ''}</div>
         </div>`
     };
   },
@@ -2957,7 +2992,23 @@ const actions = {
     const c = rvCands(d)[+el.dataset.k];
     if (c) { applyMaster(d, c, Math.max(c.sim, 0.99)); renderPanel(); }
   },
-  rvDelClinic: el => { ui.panel.review.clinics.splice(+el.dataset.i, 1); renderPanel(); },
+  rvDelClinic: el => {
+    const i = +el.dataset.i, c = ui.panel.review.clinics[i];
+    if (!c.drugs.length) { ui.panel.review.clinics.splice(i, 1); renderPanel(); return; }
+    ui.panel.delClinic = i; renderPanel();
+  },
+  rvDelCancel: () => { ui.panel.delClinic = null; renderPanel(); },
+  rvMergeClinic: el => {
+    const cs = ui.panel.review.clinics, i = +el.dataset.i, to = +el.dataset.to;
+    cs[to].drugs.push(...cs[i].drugs); cs.splice(i, 1); ui.panel.delClinic = null; renderPanel();
+  },
+  rvUnknownClinic: el => {
+    const cs = ui.panel.review.clinics, i = +el.dataset.i;
+    const u = cs.find((c, k) => k !== i && c.name === '医療機関不明');
+    if (u) { u.drugs.push(...cs[i].drugs); cs.splice(i, 1); } else cs[i].name = '医療機関不明';
+    ui.panel.delClinic = null; renderPanel();
+  },
+  rvDelClinicAll: el => { ui.panel.review.clinics.splice(+el.dataset.i, 1); ui.panel.delClinic = null; renderPanel(); },
   rvDelDrug: el => { ui.panel.review.clinics[+el.dataset.i].drugs.splice(+el.dataset.j, 1); renderPanel(); },
   rvAddDrug: el => { ui.panel.review.clinics[+el.dataset.i].drugs.push(newDrug()); renderPanel(); },
   rvAddClinic: () => { ui.panel.review.clinics.push({ id: uid(), name: '', drugs: [newDrug()] }); renderPanel(); },
@@ -3074,6 +3125,31 @@ const actions = {
     const ta = $('#fixCsv'), note = $('#copyNote');
     try { navigator.clipboard.writeText(ta.value).then(() => { note.textContent = 'コピーしました。'; }).catch(() => { ta.select(); note.textContent = '全文を選択しました。「コピー」を押してください。'; }); }
     catch (e) { ta.select(); }
+  },
+
+  // 医療機関の編集（薬は消さない）
+  clinicEdit: el => openPanel({ type: 'clinic', id: el.dataset.id }),
+  clinicRename: () => {
+    const c = state.clinics.find(x => x.id === ui.panel.id), v = ($('#cName')?.value || '').trim();
+    if (!c || !v) return;
+    const same = state.clinics.find(x => x.id !== c.id && x.name === v);
+    if (same) { same.drugs.push(...c.drugs); state.clinics = state.clinics.filter(x => x.id !== c.id); }
+    else c.name = v;
+    save(); closePanel();
+  },
+  clinicMerge: el => {
+    const c = state.clinics.find(x => x.id === ui.panel.id); if (!c) return;
+    let to = el.dataset.to === '__unknown' ? state.clinics.find(x => x.name === '医療機関不明' && x.id !== c.id) : state.clinics.find(x => x.id === el.dataset.to);
+    if (!to) { c.name = '医療機関不明'; save(); closePanel(); return; }
+    to.drugs.push(...c.drugs); state.clinics = state.clinics.filter(x => x.id !== c.id);
+    save(); closePanel();
+  },
+  drugMove: el => {
+    const r = findDrug(ui.panel.id), to = state.clinics.find(x => x.id === el.dataset.to);
+    if (!r || !to || to === r.clinic) return;
+    r.clinic.drugs = r.clinic.drugs.filter(d => d.id !== r.drug.id); to.drugs.push(r.drug);
+    state.clinics = state.clinics.filter(c => c.drugs.length);
+    save(); refresh();
   },
 
   // 用法フォーム
@@ -3285,6 +3361,11 @@ document.addEventListener('input', e => {
   }
 });
 document.addEventListener('change', async e => {
+  if (e.target.dataset.rvmove && ui.panel?.type === 'review') {
+    const [ci, di] = e.target.dataset.rvmove.split('|').map(Number), to = +e.target.value, cs = ui.panel.review.clinics;
+    if (to !== ci) { const [d] = cs[ci].drugs.splice(di, 1); cs[to].drugs.push(d); if (!cs[ci].drugs.length) cs.splice(ci, 1); renderPanel(); }
+    return;
+  }
   if (e.target.id === 'llmOn') { const c = llmCfg(); c.on = e.target.checked; setLlmCfg(c); return; }
   if (e.target.id === 'ocrFile' && e.target.files.length) {
     const files = [...e.target.files];
