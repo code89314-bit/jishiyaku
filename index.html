@@ -716,13 +716,23 @@ const LLM_SYSTEM = `あなたは病院薬剤部で持参薬鑑別を補助して
 - 半角カタカナは全角に直す。
 - name は印字どおりの薬品名（規格・メーカー名の「」も含める）。行頭の番号や記号（[1]、◇、(内)、(外) など）は除く。
 - 「一般名」「【般】」で書かれた処方箋記載名は generic に入れる（name には入れない）。
-- dose は薬品名の右側などに書かれた量（例：1錠、6錠、1.02g、7枚、60mL）。「1回◯錠」の記載は perDose に入れる。
-- usage は用法（例：1日3回 毎食後、疼痛時、1日2回 患部に塗布）。部位の指定があれば usage に含める。
-- 同じ用法が複数の薬にまとめて書かれている場合は、それぞれの薬に同じ usage と days を入れる。
-- days は日数・回数（例：14日分、10回分、1調剤）。
+- 用法は、次の項目に分けて入れる。同じ用法が複数の薬にまとめて書かれている場合は、それぞれの薬に同じ内容を入れる。
+  - dailyDose：1日量（例：3錠、1.02g、7枚、60mL）。お薬手帳で薬品名の右に書かれた量は、ふつう1日量。外用薬は全体の量（例：50g、1本）。
+  - perDose：1回量。「1回◯錠」「1回2吸入」などと書かれているときだけ入れる。
+  - perDay：1日の回数（数字）。「1日3回」「分3」なら 3。書かれていなければ、時点の数（毎食後なら3）。頓用や回数の決まりがない場合は 0。
+  - times：服用する時点を ["起床時","朝","昼","夕","就寝前"] から選んだ配列。「毎食後」は ["朝","昼","夕"]、「寝る前」「眠前」は "就寝前"。
+  - meal：食事との関係。"食前"・"食直前"・"食後"・"食直後"・"食間" のいずれか。書かれていなければ ""。
+  - frequency：毎日でない場合だけ入れる（例："週1回"、"隔日"、"2週に1回"）。
+  - prn：頓用の条件（例："疼痛時"、"発熱時・疼痛時"、"不眠時"）。頓用でなければ ""。
+  - ext：外用薬の使い方（例："患部に塗布"、"貼付"、"点眼"、"吸入"、"点鼻"）。
+  - site：使う部位（例："両眼"、"腰"、"手足・体・顔"）。
+  - unequal：時点ごとに量が違う場合（例："朝2錠・夕1錠"）。
+  - days：日数・回数（例："14日分"、"10回分"、"1調剤"）。
+  - usageText：用法の原文（印字どおり）。
+- 計算で補わない（書かれていない1日量を回数から計算するなど）。
 - シール（処方）ごとに、医療機関名と調剤日を分けて出力する。患者名・住所・電話番号・薬剤師名は出力しない。
 - 効能・注意書き・手書きのメモは出力しない。
-出力形式：{"prescriptions":[{"institution":"","date":"","drugs":[{"name":"","generic":"","dose":"","perDose":"","usage":"","days":""}]}]}`;
+出力形式：{"prescriptions":[{"institution":"","date":"","drugs":[{"name":"","generic":"","dailyDose":"","perDose":"","perDay":0,"times":[],"meal":"","frequency":"","prn":"","ext":"","site":"","unequal":"","days":"","usageText":""}]}]}`;
 async function toJpegDataURL(src, maxSide = 2000) {
   let bmp = src;
   if (!(src instanceof HTMLCanvasElement)) {
@@ -774,10 +784,11 @@ function llmToClinics(j) {
     for (const x of p.drugs || []) {
       const nm = normalize(String(x.name || '')).trim();
       if (!nm || /^[?？\s]+$/.test(nm)) continue;
-      const usage = [x.usage, x.days].map(v => normalize(String(v || '')).trim()).filter(Boolean).join(' ');
-      const d = newDrug(cleanName(nm), normalize(String(x.dose || x.perDose || '')).trim(), usage);
-      if (x.generic) d.rxName = normalize(String(x.generic)).trim();
-      if (x.perDose && x.dose) d.note = '1回' + normalize(String(x.perDose)).replace(/^1回/, '');
+      const S = v => normalize(String(v ?? '')).trim();
+      const usage = [x.usageText || x.usage, x.days].map(S).filter(Boolean).join(' ');
+      const d = newDrug(cleanName(nm), S(x.dailyDose || x.dose), usage);
+      if (x.generic) d.rxName = S(x.generic);
+      if (x.perDay !== undefined || x.times || x.meal || x.prn || x.ext) d.u = uFromLLM(x);   // 構造化された用法
       d.src = 'llm'; d.rawName = nm;
       if (Master.ready) {
         const top = searchMaster(nm, 3, true);
@@ -1229,10 +1240,57 @@ function usageLabel(u) {
   if (u.kind === 'prn') return [u.prn.join('・') || '', '頓用', u.perDose ? `1回${u.perDose}` : ''].filter(Boolean).join(' ');
   const tt = timingText(u);
   const head = u.freq ? u.freq : (u.perDay ? `分${u.perDay}` : '');
-  let body = u.kind === 'ext' ? [tt, u.ext.join('・'), u.site ? `（${u.site}）` : ''].filter(Boolean).join(' ') : tt;
+  let body = u.kind === 'ext' ? [tt, u.ext.join('・')].filter(Boolean).join(' ') + (u.site ? `（${u.site}）` : '') : tt;
   if (!body && u.perDose) body = `1回${u.perDose}`;   // 吸入薬など時点の書かれない用法
   const uneq = u.unequal.length ? `（${u.unequal.join('・')}）` : '';
   return [head, body].filter(Boolean).join(' ') + uneq || u.raw;
+}
+
+/* ---- 用法フォーム（構造化した用法）----
+   d.u = { perDay, times[], meal, freq, prn, ext, site, perDose, unequal, days }。1日量は d.dose。 */
+const MEALS = ['食前', '食直前', '食後', '食直後', '食間'];
+function uFromStruct(su) {
+  return {
+    perDay: su.perDay || 0, times: [...su.times], meal: su.meal || '', freq: su.freq || '',
+    prn: su.prn.join('・') || (su.prnFlag ? '頓用' : ''), ext: su.ext.join('・'), site: su.site || '',
+    perDose: su.perDose || '', unequal: su.unequal.join('・'),
+    days: su.days ? `${su.days}日分` : su.count ? `${su.count}回分` : ''
+  };
+}
+function uFromLLM(x) {
+  const S = v => normalize(String(v ?? '')).trim();
+  const times = (Array.isArray(x.times) ? x.times : String(x.times || '').split(/[・,、\s]+/)).map(S)
+    .map(t => /寝|眠/.test(t) ? '就寝前' : /起床/.test(t) ? '起床時' : t).filter(t => T_ORDER.includes(t));
+  times.sort((a, b) => T_ORDER.indexOf(a) - T_ORDER.indexOf(b));
+  return {
+    perDay: Number.parseInt(S(x.perDay), 10) || 0, times: [...new Set(times)], meal: MEALS.includes(S(x.meal)) ? S(x.meal) : '',
+    freq: S(x.frequency), prn: S(x.prn).replace(/頓用|頓服/g, '').replace(/^[・\s]+|[・\s]+$/g, '') || (/頓用|頓服/.test(S(x.prn)) ? '頓用' : ''),
+    ext: S(x.ext), site: S(x.site), perDose: S(x.perDose).replace(/^1回/, ''), unequal: S(x.unequal), days: S(x.days)
+  };
+}
+// フォームの内容（無ければ原文の解析結果）
+function getU(d) { return d.u || uFromStruct(structUsage(d.usage)); }
+// フォームからレポート表記・並び順・注意を作る
+function evalU(u, dose) {
+  const su = {
+    found: true, raw: '', perDay: u.perDay || 0, times: u.times || [], meal: u.meal || '', freq: u.freq || '',
+    prn: u.prn && u.prn !== '頓用' ? u.prn.split(/[・、]/) : [], prnFlag: !!u.prn, ext: u.ext ? [u.ext] : [], site: u.site || '',
+    perDose: u.perDose || '', unequal: u.unequal ? [u.unequal] : []
+  };
+  su.kind = su.prnFlag ? 'prn' : su.ext.length ? 'ext' : 'reg';
+  const empty = !su.perDay && !su.times.length && !su.meal && !su.freq && !su.prnFlag && !su.ext.length && !su.perDose;
+  const flags = [];
+  const n = su.times.length;
+  if (su.kind !== 'prn' && su.perDay && n && su.perDay !== n && !su.freq) flags.push(`回数（1日${su.perDay}回）と時点（${n}か所）が合いません`);
+  if (su.kind === 'reg' && su.times.some(t => ['朝', '昼', '夕'].includes(t)) && !su.meal && !su.unequal.length) flags.push('食前・食後が入っていません');
+  // 1日量 ＝ 1回量 × 回数 の突き合わせ（数字と単位がそろうときだけ）
+  const num = t => { const m = String(t || '').normalize('NFKC').match(/^(\d+(?:\.\d+)?)\s*(\D*)$/); return m ? [+m[1], m[2]] : null; };
+  const a = num(dose), b = num(su.perDose);
+  if (a && b && su.perDay && su.kind === 'reg' && (!a[1] || !b[1] || a[1] === b[1]) && Math.abs(a[0] - b[0] * su.perDay) > 1e-6)
+    flags.push(`1日量（${dose}）が 1回量${su.perDose}×${su.perDay}回 と合いません`);
+  const label = empty ? '用法未記載' : usageLabel(su);
+  const sortKey = [su.kind === 'prn' ? 2 : empty ? 1 : 0, su.perDay || 9, su.meal in MEAL_RANK ? MEAL_RANK[su.meal] : 5, n ? T_ORDER.indexOf(su.times[0]) : 9];
+  return { label, sortKey, flags, kind: su.kind, empty };
 }
 
 // 処方箋記載名の行（【般】〜／同成分・同規格の別名）か
@@ -2085,7 +2143,9 @@ function buildReport() {
     out.push('●' + c.name);
     const groups = new Map();
     for (const d of c.drugs) {
-      const u = usageInfo(d.usage, (d.usageLabel || '').trim());
+      const e = evalU(getU(d), d.dose);
+      const ov = (d.usageLabel || '').trim();
+      const u = { label: ov || (e.empty && d.usage ? usageInfo(d.usage).label : e.label), key: e.sortKey };
       // 外用は頓用（内服）よりさらに下。外用どうしは分の少ない順
       const ext = isExt(d);
       if (ext) u.key = [3, ...u.key];
@@ -2320,7 +2380,7 @@ const PANELS = {
               <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
               ${d.rxName ? `<div class="rv-badge">処方名：${esc(d.rxName)}</div>` : ''}
               ${d.src === 'llm' ? `<div class="rv-badge">LLMで読み取り${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>` : ''}
-              ${usageBadge(d.usage)}
+              ${usageBadgeD(d)}
             </div>`).join('')}
           <button class="btn" data-act="rvAddDrug" data-i="${ci}">＋ 薬品を追加</button>
         </div>`).join('')
@@ -2397,17 +2457,16 @@ const PANELS = {
           </div>
         </div>
 
+        ${usageForm(d)}
         ${matchBlock(d)}
         ${altBlock(d)}
 
         <div class="block">
           <h3>薬品情報（修正できます）</h3>
           <div class="field"><label for="f-name">薬品名</label><input id="f-name" data-f="name" value="${esc(d.name)}"></div>
-          <div class="field"><label for="f-dose">用量</label><input id="f-dose" data-f="dose" value="${esc(d.dose)}"></div>
           ${d.rxName ? `<div class="field"><label for="f-rx">処方箋記載名</label><input id="f-rx" data-f="rxName" value="${esc(d.rxName)}"></div>` : ''}
           <div class="field"><label for="f-usage">用法（読み取った原文）</label><textarea id="f-usage" data-f="usage" rows="2">${esc(d.usage)}</textarea></div>
-          <div id="usageBadge">${usageBadge(d.usage)}</div>
-          <div class="field"><label for="f-ulabel">レポートの用法を手で直す（空欄なら自動）</label><input id="f-ulabel" data-f="usageLabel" value="${esc(d.usageLabel || '')}" placeholder="例: 分2 朝夕食後"></div>
+          ${d.u ? '' : `<button class="btn" data-act="uReparse">原文から用法フォームを作り直す</button>`}
           <button class="btn" data-act="toggleExt">${isExt(d) ? '内服薬として扱う（シート・錠数で数える）' : '外用薬として扱う（本数で数える）'}</button>
           ${confirm
             ? `<div class="confirm"><p>この薬を一覧から削除しますか？</p><div class="inline"><button class="btn danger" data-act="delDrugYes">削除する</button><button class="btn" data-act="cancelConfirm">やめる</button></div></div>`
@@ -2670,6 +2729,13 @@ const PANELS = {
   }
 };
 
+function usageBadgeD(d) {
+  const u = getU(d), e = evalU(u, d.dose);
+  if (e.empty) return d.usage ? `<div class="rv-badge ng">用法を読み取れません（数量入力画面の用法フォームで入れてください）</div>` : '';
+  const parts = [d.dose ? `1日量 ${d.dose}` : '', u.perDose ? `1回 ${u.perDose}` : '', u.days].filter(Boolean).join('・');
+  return `<div class="rv-badge ${e.flags.length ? 'ng' : 'ok'}">レポート：・・・・・${esc(d.usageLabel || e.label)}${parts ? `（${esc(parts)}）` : ''}</div>`
+    + e.flags.map(f => `<div class="rv-badge ng">⚠ ${esc(f)}</div>`).join('');
+}
 function usageBadge(text) {
   const u = structUsage(text);
   if (!u.found) return text ? `<div class="rv-badge ng">用法を読み取れません（レポートには原文のまま載ります）</div>` : '';
@@ -2688,6 +2754,35 @@ const gs1Field = (act) => `
     <div class="other"><input id="gs1In" inputmode="numeric" placeholder="(01)14987…" autocomplete="off" autocorrect="off" spellcheck="false">
     <button class="btn" data-act="${act}">特定</button></div>
     <p class="muted" id="gs1Msg" role="status"></p></div>`;
+
+function usageForm(d) {
+  const u = getU(d), e = evalU(u, d.dose);
+  const chip = (act, v, on, label = v) => `<button class="seg${on ? ' on' : ''}" data-act="${act}" data-v="${esc(v)}" style="padding:0 10px">${esc(label)}</button>`;
+  const fld = (k, label, ph, val = u[k]) => `<div class="field"><label for="u-${k}">${label}</label><input id="u-${k}" data-u="${k}" value="${esc(val || '')}" placeholder="${ph}" autocomplete="off"></div>`;
+  return `<div class="block">
+    <h3>用法<small>${d.src === 'llm' && d.u ? 'LLMの読み取り結果' : d.u ? '手で入力' : '原文から自動'}</small></h3>
+    <p class="okline" id="uLabel">レポート：・・・・・${esc(d.usageLabel || e.label)}</p>
+    <div id="uFlags">${e.flags.map(f => `<p class="warnline">⚠ ${esc(f)}</p>`).join('')}</div>
+    <div class="rv-pair" style="grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field"><label for="u-dose">1日量</label><input id="u-dose" data-f="dose" value="${esc(d.dose)}" placeholder="例: 3錠" autocomplete="off"></div>
+      ${fld('perDose', '1回量', '例: 1錠')}
+    </div>
+    <div class="field"><label>1日の回数</label><div class="sizes">${[1, 2, 3, 4].map(n => chip('uPerDay', n, u.perDay === n, n + '回')).join('')}${chip('uPerDay', 0, !u.perDay, '指定なし')}</div></div>
+    <div class="field"><label>時点</label><div class="sizes">${T_ORDER.map(t => chip('uTime', t, u.times.includes(t))).join('')}</div></div>
+    <div class="field"><label>食事との関係</label><div class="sizes">${MEALS.map(m => chip('uMeal', m, u.meal === m)).join('')}${chip('uMeal', '', !u.meal, 'なし')}</div></div>
+    <div class="field"><label>頻度</label><div class="sizes">${chip('uFreq', '', !u.freq, '毎日')}${['週1回', '隔日'].map(f => chip('uFreq', f, u.freq === f)).join('')}</div></div>
+    ${fld('freq', '頻度（その他）', '例: 2週に1回')}
+    ${fld('prn', '頓用の条件', '例: 疼痛時')}
+    <div class="rv-pair" style="grid-template-columns:1fr 1fr;gap:10px">${fld('ext', '外用の使い方', '例: 患部に塗布')}${fld('site', '部位', '例: 腰')}</div>
+    <div class="rv-pair" style="grid-template-columns:1fr 1fr;gap:10px">${fld('unequal', '時点ごとの量', '例: 朝2錠・夕1錠')}${fld('days', '日数', '例: 14日分')}</div>
+    <div class="field"><label for="f-ulabel">レポートの用法を手で直す（空欄なら自動）</label><input id="f-ulabel" data-f="usageLabel" value="${esc(d.usageLabel || '')}" placeholder="例: 分2 朝夕食後"></div>
+  </div>`;
+}
+function refreshUsageLabel(d) {
+  const e = evalU(getU(d), d.dose), l = $('#uLabel'), f = $('#uFlags');
+  if (l) l.textContent = 'レポート：・・・・・' + (d.usageLabel || e.label);
+  if (f) f.innerHTML = e.flags.map(x => `<p class="warnline">⚠ ${esc(x)}</p>`).join('');
+}
 
 function altTag(d) {
   const a = altFor(d);
@@ -2952,6 +3047,17 @@ const actions = {
     catch (e) { ta.select(); }
   },
 
+  // 用法フォーム
+  uPerDay: el => { const d = findDrug(ui.panel.id).drug; d.u = { ...getU(d), perDay: +el.dataset.v }; save(); refresh(); },
+  uTime: el => {
+    const d = findDrug(ui.panel.id).drug, u = { ...getU(d) }, t = el.dataset.v;
+    u.times = u.times.includes(t) ? u.times.filter(x => x !== t) : [...u.times, t].sort((a, b) => T_ORDER.indexOf(a) - T_ORDER.indexOf(b));
+    d.u = u; save(); refresh();
+  },
+  uMeal: el => { const d = findDrug(ui.panel.id).drug; d.u = { ...getU(d), meal: el.dataset.v }; save(); refresh(); },
+  uFreq: el => { const d = findDrug(ui.panel.id).drug; d.u = { ...getU(d), freq: el.dataset.v }; save(); refresh(); },
+  uReparse: () => { const d = findDrug(ui.panel.id).drug; d.u = uFromStruct(structUsage(d.usage)); save(); refresh(); },
+
   // 代替薬
   altPick: el => {
     const d = findDrug(ui.panel.id).drug, a = altFor(d);
@@ -3102,6 +3208,11 @@ document.addEventListener('input', e => {
   if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
   if (t.id === 'reportText') { ui.panel.text = t.value; return; }
   if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
+  if (t.dataset.u && ui.panel?.type === 'heat') {
+    const r = findDrug(ui.panel.id);
+    if (r) { r.drug.u = { ...getU(r.drug), [t.dataset.u]: t.value.trim() }; save(); refreshUsageLabel(r.drug); renderMain(); }
+    return;
+  }
   if (t.dataset.llm) {
     const c = llmCfg();
     let v = t.value.trim();
@@ -3132,7 +3243,7 @@ document.addEventListener('input', e => {
     if (r) {
       r.drug[t.dataset.f] = t.value;
       if (t.dataset.f === 'name') { r.drug.yj = ''; r.drug.matchSim = 0; r.drug.rawName = t.value; }
-      if (t.dataset.f === 'usage') { const b = $('#usageBadge'); if (b) b.innerHTML = usageBadge(t.value); }
+      if (['dose', 'usageLabel', 'usage'].includes(t.dataset.f)) refreshUsageLabel(r.drug);
       save(); renderMain();
     }
     return;
