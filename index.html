@@ -255,11 +255,16 @@ main { padding-block: 12px 220px; display: flex; flex-direction: column; gap: 18
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 
-.timing { display: grid; grid-template-columns: 3.6em 44px 1fr 44px; gap: 8px; align-items: center; }
+.timing { display: grid; grid-template-columns: 3.6em 44px minmax(0, 1fr) 44px; gap: 8px; align-items: center; }
+.timing input { width: 100%; min-width: 0; box-sizing: border-box; }
 .timing .tl { font-weight: 700; font-family: var(--font-display); }
 .timing input { height: 44px; text-align: center; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .timing button { height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 20px; }
 .timing button.plus { background: var(--pack-soft); border-color: var(--pack); color: var(--pack); }
+.pk-in { margin: 2px 0 10px calc(3.6em + 8px); font-size: 13px; line-height: 1.45; color: var(--ink-2, #555); }
+.pk-in b { color: var(--pack); font-size: 14px; margin-right: 6px; }
+.pk-in span { display: block; }
+.pk-in.none { color: var(--muted, #999); }
 .pk-total { text-align: right; font-weight: 700; color: var(--pack); font-variant-numeric: tabular-nums; }
 .pick { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer; }
 .pick:first-child { border-top: 0; }
@@ -496,6 +501,58 @@ const newDrug = (name = '', dose = '', usage = '') => ({ id: uid(), name, dose, 
 
 const TIMINGS = [['wake', '起床時'], ['morning', '朝'], ['noon', '昼'], ['evening', '夕'], ['bedtime', '眠前']];
 const packTotal = p => TIMINGS.reduce((a, [k]) => a + (p.counts[k] || 0), 0);
+/* ---- 一包化の中身：時点ごとに1包に何錠入るか（半錠も1個と数える） ---- */
+const T_OF_KEY = { wake: '起床時', morning: '朝', noon: '昼', evening: '夕', bedtime: '就寝前' };
+const COUNTABLE = /^(錠|カプセル|丸|個)$/;
+function amountAt(d, t) {
+  // 戻り値：{ amt, unit } ／ null（この時点には入らない）／ { unknown: 理由 }
+  const U = getU(d);
+  if (U.prn || U.ext) return { unknown: U.prn ? '頓用' : '外用' };
+  const unitD = doseUnit(d);
+  const num = v => { const m = String(v || '').normalize('NFKC').replace(/^1回/, '').match(/^(\d+(?:\.\d+)?)\s*(\D*)$/); return m ? [+m[1], m[2] || ''] : null; };
+  // 時点ごとに量が違う（「朝2錠・夕1錠」）
+  if (U.unequal) {
+    const re = /(起床時?|朝|昼|夕|就寝前|眠前|寝る前)\s*(\d+(?:\.\d+)?)\s*(錠|カプセル|丸|個|包|g|mL)?/g, map = {};
+    for (const m of String(U.unequal).normalize('NFKC').matchAll(re)) map[/寝|眠/.test(m[1]) ? '就寝前' : /起床/.test(m[1]) ? '起床時' : m[1]] = [+m[2], m[3] || unitD];
+    if (Object.keys(map).length) return map[t] ? { amt: map[t][0], unit: map[t][1] } : null;
+  }
+  const times = U.times || [];
+  if (!times.length) return { unknown: '服用時点が未入力' };
+  if (!times.includes(t)) return null;
+  const pd = num(U.perDose);
+  if (pd) return { amt: pd[0], unit: pd[1] || perDoseUnit(d) };
+  const dd = num(d.dose);
+  if (!dd) return { unknown: '1日量が未入力' };
+  const n = U.perDay || times.length, a = dd[0] / n;
+  // 1日量が整数なのに等分すると端数が出る（1日3錠・分2など）→ 朝2・夕1かもしれないので決めつけない
+  if (Math.abs(a - Math.round(a)) > 1e-6 && (Number.isInteger(dd[0]) || Math.abs(a * 2 - Math.round(a * 2)) > 1e-6))
+    return { unknown: `1日${d.dose}・${n}回では時点ごとの量が決まりません` };
+  return { amt: a, unit: dd[1] || unitD };
+}
+function packContents(pk) {
+  const drugs = pk.drugIds.map(id => findDrug(id)?.drug).filter(Boolean);
+  const res = {}, unknown = [];
+  for (const [k] of TIMINGS) res[k] = { pieces: 0, items: [], other: [] };
+  for (const d of drugs) {
+    let bad = '';
+    for (const [k] of TIMINGS) {
+      const a = amountAt(d, T_OF_KEY[k]);
+      if (!a) continue;
+      if (a.unknown) { bad = a.unknown; break; }
+      if (!a.amt) continue;
+      if (COUNTABLE.test(a.unit)) {
+        const pieces = Math.ceil(a.amt - 1e-9);   // 半錠も1個
+        res[k].pieces += pieces;
+        res[k].items.push({ d, amt: a.amt, unit: a.unit, pieces });
+      } else res[k].other.push({ d, amt: a.amt, unit: a.unit });
+    }
+    if (bad) unknown.push({ d, why: bad });
+  }
+  return { res, unknown };
+}
+const pkName = d => displayName(d).replace(/「[^」]*」/g, '').replace(/\s+/g, '').slice(0, 16);
+const fmtAmt = x => x === 0.5 ? '½' : Number.isInteger(x) ? String(x) : Number.isInteger(x - 0.5) ? `${x - 0.5}½` : String(x);
+
 const packSummary = p => TIMINGS.filter(([k]) => p.counts[k] > 0).map(([k, l]) => l + p.counts[k]).join(' ');
 
 function touch(id) {
@@ -2834,6 +2891,7 @@ const PANELS = {
 
   pack() {
     const pk = ui.panel.pack;
+    const pc = packContents(pk);
     const exists = state.packs.some(p => p.id === pk.id);
     const confirm = ui.panel.confirm === 'deletePack';
     return {
@@ -2845,13 +2903,21 @@ const PANELS = {
         </div>
         <div class="block">
           <h3>包数</h3>
-          ${TIMINGS.map(([k, l]) => `
+          ${TIMINGS.map(([k, l]) => {
+            const r = pc.res[k], has = r.items.length || r.other.length;
+            return `
             <div class="timing">
               <span class="tl">${l}</span>
               <button data-act="tm" data-k="${k}" data-v="-1" aria-label="${l}を1包減らす">−</button>
               <input inputmode="numeric" data-tm="${k}" value="${pk.counts[k] || ''}" placeholder="0" aria-label="${l}の包数">
               <button class="plus" data-act="tm" data-k="${k}" data-v="1" aria-label="${l}を1包増やす">＋</button>
-            </div>`).join('')}
+            </div>
+            <div class="pk-in${has ? '' : ' none'}">${has
+              ? `<b>1包に ${r.pieces}錠</b>${r.other.length ? ` ＋ ${r.other.map(o => esc(pkName(o.d)) + ' ' + fmtAmt(o.amt) + esc(o.unit)).join('、')}` : ''}
+                 <span>${r.items.map(it => `${esc(pkName(it.d))} ${fmtAmt(it.amt)}${it.amt % 1 ? `（${it.pieces}個）` : ''}`).join('・')}</span>`
+              : 'この時点の薬はありません'}</div>`;
+          }).join('')}
+          ${pc.unknown.length ? `<p class="warnline">次の薬は用法から時点ごとの量がわからないため、数に入れていません：${pc.unknown.map(u => esc(pkName(u.d)) + '（' + esc(u.why) + '）').join('、')}。薬をタップし、用法の「時点ごとの量」に「朝2錠・夕1錠」のように入れると数えられます。</p>` : ''}
           <div class="pk-total" id="pkTotal">合計 ${packTotal(pk)} 包</div>
         </div>
         <div class="block">
