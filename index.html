@@ -2806,11 +2806,14 @@ const RCP = (() => {
   try { o = JSON.parse(localStorage.getItem('jishiyaku.rcp') || '{}'); } catch (e) {}
   const t = new Date();
   return { wards: o.wards?.length ? o.wards : [{ name: '病棟', weekday: 4, end: 'prev' }], ward: o.ward || 0,
-    start: o.start || [dISO(t), 2], discharge: '', lax: {}, remain: {}, editWard: false, msg: '' };
+    start: o.start || [dISO(t), 3], startMode: 'new', discharge: '', lax: {}, remain: {}, editWard: false, msg: '' };
 })();
 const rcpSave = () => { try { localStorage.setItem('jishiyaku.rcp', JSON.stringify({ wards: RCP.wards, ward: RCP.ward, start: RCP.start })); } catch (e) {} };
 const rcWard = () => RCP.wards[RCP.ward] || RCP.wards[0];
-const rcRecipe = () => buildRecipe(RPT.doc, RPT.instr, { ward: rcWard(), discharge: RCP.discharge, start: RCP.start, lax: RCP.lax });
+// 用意済みの記載がない薬の開始：新規入院で今日から継続なら「指示日（なければ今日）の夕から」が決まり
+const rcNewStart = () => [mdToISO(RPT.instr?.date) || dISO(new Date()), 3];
+const rcStart = () => RCP.startMode === 'new' ? rcNewStart() : RCP.start;
+const rcRecipe = () => buildRecipe(RPT.doc, RPT.instr, { ward: rcWard(), discharge: RCP.discharge, start: rcStart(), lax: RCP.lax });
 // レシピの終わりを、指示の「用意済み」に書き込む（同じ日付・時点・残薬の行はまとめる）
 function rcApply() {
   const R = rcRecipe(), ins = RPT.instr;
@@ -3692,8 +3695,10 @@ const PANELS = {
               <div class="inline"><button class="btn" data-act="rcWardAdd">＋ 病棟を追加</button>${RCP.wards.length > 1 ? '<button class="btn ghost danger" data-act="rcWardDel">この病棟を削除</button>' : ''}</div>
             </div>` : ''}</div>
           ${needStart ? `<div class="field"><label>用意済みの記載がない薬（${noPrep.map(d => circled(d.no)).join('')}）の開始</label>
+            <div class="sizes">${seg('rcStartMode', [['new', '新規入院（指示日の夕から）'], ['custom', '日付と時点を指定']], RCP.startMode)}</div>
+            ${RCP.startMode === 'new' ? `<p class="muted">${dMDW(rcNewStart()[0])}の夕から作ります。夕に飲まない薬は翌日から始まります。</p>` : `
             <div class="prep-when"><input type="date" id="rcStartDate" value="${RCP.start[0]}"><span>の</span></div>
-            <div class="sizes">${seg('rcStartTime', RC_T.map((t, i) => [i, rcLabel(t)]), RCP.start[1])}<span class="muted" style="align-self:center">から</span></div></div>` : ''}
+            <div class="sizes">${seg('rcStartTime', RC_T.map((t, i) => [i, rcLabel(t)]), RCP.start[1])}<span class="muted" style="align-self:center">から</span></div>`}</div>` : ''}
           <div class="field"><label for="rcDis">退院日（決まっていれば・その日の朝まで作る）</label>
             <div class="prep-when"><input type="date" id="rcDis" value="${RCP.discharge}">${RCP.discharge ? '<button class="btn ghost" data-act="rcDisClear">なし</button>' : ''}</div></div>
           <div class="field"><label>別包にする薬（下剤）<small>自動で選んでいます・タップで切替</small></label>
@@ -4323,6 +4328,7 @@ const actions = {
   rcEndMode: el => { rcWard().end = el.dataset.v; rcpSave(); renderPanel(); },
   rcWardAdd: () => { RCP.wards.push({ name: '病棟' + (RCP.wards.length + 1), weekday: 4, end: 'prev' }); RCP.ward = RCP.wards.length - 1; rcpSave(); renderPanel(); },
   rcWardDel: () => { RCP.wards.splice(RCP.ward, 1); RCP.ward = 0; rcpSave(); renderPanel(); },
+  rcStartMode: el => { RCP.startMode = el.dataset.v; if (el.dataset.v === 'custom') RCP.start = rcNewStart(); renderPanel(); },
   rcStartTime: el => { RCP.start = [RCP.start[0], +el.dataset.v]; rcpSave(); renderPanel(); },
   rcDisClear: () => { RCP.discharge = ''; renderPanel(); },
   rcLax: el => { const n = +el.dataset.n, d = RPT.doc.drugs.find(x => x.no === n); RCP.lax[n] = !(RCP.lax[n] ?? LAXATIVE.test(d?.name || '')); renderPanel(); },
