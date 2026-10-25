@@ -545,7 +545,7 @@ function undoLast() {
   save(); refresh();
 }
 
-/* ================= 画像OCR（Tesseract・端末内で処理） =================
+/* ================= 画像OCR（NDLOCR-Lite または Tesseract・端末内で処理） =================
    エンジンと日本語データはこのページと一緒に置いたファイルから読み込む（外部送信なし） */
 const OCR = { worker: null, loading: null, queue: Promise.resolve(), pending: 0, status: '', progress: 0, pages: 0 };
 const assetURL = f => new URL(f, location.href).href;
@@ -797,13 +797,226 @@ function llmToClinics(j) {
       d.src = 'llm'; d.rawName = nm;
       if (Master.ready) {
         const top = searchMaster(nm, 6, true);
-        if (top[0] && top[0].sim >= 0.9 && (!top[1] || top[0].sim - top[1].sim >= 0.03)) applyMaster(d, top[0], top[0].sim);
+        if (top[0] && top[0].sim >= 0.9 && (!top[1] || top[0].sim - top[1].sim >= 0.03) && strengthOK(nm, top[0].n)) applyMaster(d, top[0], top[0].sim);
         else if (top.length) d.cands = top;
       }
       c.drugs.push(d);
     }
   }
   return clinics.filter(c => c.drugs.length);
+}
+
+/* ---- NDLOCR-Lite（国立国会図書館・CC BY 4.0）を端末内で動かす（GitHub Pages版のみ）----
+   モデル（約80MB）は初回だけダウンロードして端末に保存する。
+   行の検出（DEIM）→ 各行の文字認識（PARSeq 30/50/100文字）。すべて端末内で処理する。 */
+const NDL = { ready: null, det: null, rec: {}, chars: null, base: 'ndl/', ortBase: 'ort/', ver: 'ndl-v1' };
+const NDL_LINE = new Set([1, 2, 3, 4, 5, 16]);   // line_main, caption, ad, note, note_tochu, title
+
+async function ndlFetch(url, onProgress) {
+  let cache = null;
+  try { cache = await caches.open(NDL.ver); const hit = await cache.match(url); if (hit) return new Uint8Array(await hit.arrayBuffer()); } catch (e) { cache = null; }
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} ${r.status}`);
+  const total = +r.headers.get('content-length') || 0;
+  let buf;
+  if (r.body && total && onProgress) {
+    const reader = r.body.getReader(), parts = []; let got = 0;
+    for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.length; onProgress(got, total); }
+    buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+  } else buf = new Uint8Array(await r.arrayBuffer());
+  // Service Workerがある場合はそちらが保存する（二重に書かない）
+  try { if (cache && !navigator.serviceWorker?.controller) await cache.put(url, new Response(buf, { headers: { 'Content-Type': 'application/octet-stream' } })); } catch (e) {}
+  return buf;
+}
+
+function ndlLoad(onStatus = () => {}) {
+  if (!NDL.ready) NDL.ready = (async () => {
+    if (!window.ort) await new Promise((res, rej) => { const s = document.createElement('script'); s.src = NDL.ortBase + 'ort.wasm.min.js'; s.onload = res; s.onerror = () => rej(new Error('ort')); document.head.appendChild(s); });
+    ort.env.wasm.wasmPaths = new URL(NDL.ortBase, location.href).href;
+    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
+    const files = [['deim', 20.2], ['parseq30', 18.3], ['parseq50', 19.0], ['parseq100', 23.3]];
+    const totalMB = files.reduce((a, f) => a + f[1], 0); let doneMB = 0;
+    NDL.chars = Array.from(JSON.parse(new TextDecoder().decode(await ndlFetch(NDL.base + 'chars.json'))));
+    const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
+    for (const [name, mb] of files) {
+      const buf = await ndlFetch(NDL.base + name + '.onnx', (got, tot) => onStatus(`OCRモデルを準備中… ${Math.round((doneMB + mb * got / tot) / totalMB * 100)}%`, (doneMB + mb * got / tot) / totalMB));
+      doneMB += mb;
+      onStatus(`OCRモデルを準備中… ${Math.round(doneMB / totalMB * 100)}%`, doneMB / totalMB);
+      const s = await ort.InferenceSession.create(buf, opt);
+      if (name === 'deim') NDL.det = s; else NDL.rec[+name.slice(6)] = s;
+    }
+  })().catch(e => { NDL.ready = null; throw e; });
+  return NDL.ready;
+}
+
+// 行の検出：正方形に余白を足して800×800に縮小、ImageNetの平均・分散で正規化
+async function ndlDetect(canvas) {
+  const W = canvas.width, H = canvas.height, S = Math.max(W, H), N = 800;
+  const c = document.createElement('canvas'); c.width = N; c.height = N;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#000'; g.fillRect(0, 0, N, N);
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  g.drawImage(canvas, 0, 0, W * N / S, H * N / S);
+  const px = g.getImageData(0, 0, N, N).data, t = new Float32Array(3 * N * N);
+  const mean = [0.485, 0.456, 0.406], sd = [0.229, 0.224, 0.225];
+  for (let i = 0; i < N * N; i++) for (let k = 0; k < 3; k++) t[k * N * N + i] = (px[i * 4 + k] / 255 - mean[k]) / sd[k];
+  const s = NDL.det;
+  const out = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', t, [1, 3, N, N]), [s.inputNames[1]]: new ort.Tensor('int64', BigInt64Array.from([BigInt(N), BigInt(N)]), [1, 2]) });
+  const labels = out[s.outputNames[0]].data, boxes = out[s.outputNames[1]].data, scores = out[s.outputNames[2]].data;
+  const cc = s.outputNames[3] ? out[s.outputNames[3]].data : null;
+  const k = S / N, dets = [];
+  for (let i = 0; i < scores.length; i++) {
+    const cls = Number(labels[i]) - 1;
+    if (scores[i] < 0.3 || !NDL_LINE.has(cls)) continue;
+    const b = [boxes[i * 4] * k, boxes[i * 4 + 1] * k, boxes[i * 4 + 2] * k, boxes[i * 4 + 3] * k].map((v, j) => Math.round(Math.max(0, Math.min(j % 2 ? H : W, v))));
+    if (b[2] - b[0] < 4 || b[3] - b[1] < 4) continue;
+    dets.push({ box: b, conf: scores[i], cnt: cc ? Number(cc[i]) : 100 });
+  }
+  // 重なる行は確信度の高い方だけ残す（小さい方の面積の半分以上が重なれば同じ行とみなす）
+  dets.sort((a, b) => b.conf - a.conf);
+  const keep = [];
+  for (const d of dets) {
+    const [x0, y0, x1, y1] = d.box, a = (x1 - x0) * (y1 - y0);
+    if (keep.some(q => { const [X0, Y0, X1, Y1] = q.box; const iw = Math.max(0, Math.min(x1, X1) - Math.max(x0, X0)), ih = Math.max(0, Math.min(y1, Y1) - Math.max(y0, Y0)); return iw * ih / Math.min(a, (X1 - X0) * (Y1 - Y0)) > 0.5; })) continue;
+    keep.push(d);
+  }
+  return keep.sort((a, b) => (a.box[1] + a.box[3]) - (b.box[1] + b.box[3]));
+}
+
+// 1行の文字認識：高さ24に引き伸ばし（OpenCVのINTER_LINEARと同じ双線形補間）、[-1,1]に正規化。縦長なら90度回す
+function ndlPixels(canvas) {
+  if (canvas.__ndlpx) return canvas.__ndlpx;
+  return (canvas.__ndlpx = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height).data);
+}
+async function ndlReadLine(canvas, box, n) {
+  const s = NDL.rec[n], IH = 24, IW = n === 30 ? 256 : n === 50 ? 384 : 768;
+  const src = ndlPixels(canvas), SW = canvas.width;
+  const [x0, y0, x1, y1] = box, w = x1 - x0, h = y1 - y0, rot = h > w * 0.8;
+  // rot：反時計回りに90度回した画像（幅h・高さw）を作ってから縮める
+  const cw = rot ? h : w, ch = rot ? w : h;
+  const at = (x, y, k) => rot ? src[((y0 + x) * SW + (x0 + (w - 1 - y))) * 4 + k] : src[((y0 + y) * SW + (x0 + x)) * 4 + k];
+  const t = new Float32Array(3 * IW * IH), P = IW * IH, fx = cw / IW, fy = ch / IH;
+  for (let dy = 0; dy < IH; dy++) {
+    let sy = (dy + 0.5) * fy - 0.5; if (sy < 0) sy = 0;
+    let iy = Math.floor(sy); const ty = sy - iy; if (iy >= ch - 1) iy = ch - 1;
+    const iy1 = Math.min(ch - 1, iy + 1);
+    for (let dx = 0; dx < IW; dx++) {
+      let sx = (dx + 0.5) * fx - 0.5; if (sx < 0) sx = 0;
+      let ix = Math.floor(sx); const tx = sx - ix; if (ix >= cw - 1) ix = cw - 1;
+      const ix1 = Math.min(cw - 1, ix + 1), o = dy * IW + dx;
+      for (let k = 0; k < 3; k++) {
+        const v = (at(ix, iy, k) * (1 - tx) + at(ix1, iy, k) * tx) * (1 - ty) + (at(ix, iy1, k) * (1 - tx) + at(ix1, iy1, k) * tx) * ty;
+        t[k * P + o] = v / 127.5 - 1;
+      }
+    }
+  }
+  const out = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', t, [1, 3, IH, IW]) });
+  const o = out[s.outputNames[0]], [, L, C] = o.dims, d = o.data;
+  let str = '';
+  for (let i = 0; i < L; i++) {
+    let best = 0, bv = -Infinity;
+    for (let j = 0; j < C; j++) { const v = d[i * C + j]; if (v > bv) { bv = v; best = j; } }
+    if (best === 0) break;
+    str += NDL.chars[best - 1] || '';
+  }
+  return str;
+}
+
+// 画像 → 行（文字列と位置）。行の縦横比で30／50／100文字のモデルを選び、収まらなければ大きいモデルへ回す
+async function ndlRecognize(canvas, onStatus = () => {}) {
+  await ndlLoad(onStatus);
+  onStatus('行を検出中…', 0.05);
+  let dets = await ndlDetect(canvas);
+  const lines = [];
+  // 横書きの行の高さの中央値：細すぎる枠（罫線など）は捨て、2段以上をまとめた枠は段ごとに分ける
+  const hs = dets.map(d => d.box[3] - d.box[1]).filter((h, i) => dets[i].box[2] - dets[i].box[0] > h).sort((a, b) => a - b);
+  const mh = hs.length ? hs[hs.length >> 1] : 0;
+  if (mh) dets = dets.flatMap(d => {
+    const [x0, y0, x1, y1] = d.box, h = y1 - y0;
+    if (x1 - x0 <= h) return [d];
+    if (h < mh * 0.45) return [];
+    const k = Math.round(h / mh);
+    if (h < mh * 1.6 || k < 2) return [d];
+    return Array.from({ length: k }, (_, j) => ({ ...d, split: true, box: [x0, Math.round(y0 + h * j / k), x1, Math.round(y0 + h * (j + 1) / k)] }));
+  });
+  // 分けた段が、別に検出された行と重なる場合はその段を捨てる
+  const ov = (a, b) => { const iw = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])), ih = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1])); return iw * ih / ((a[2] - a[0]) * (a[3] - a[1])); };
+  dets = dets.filter(d => !d.split || !dets.some(q => !q.split && ov(d.box, q.box) > 0.4));
+  for (let i = 0; i < dets.length; i++) {
+    onStatus(`文字を読み取り中… ${i + 1}/${dets.length}行`, 0.1 + 0.9 * i / dets.length);
+    const d = dets[i];
+    const [bx0, by0, bx1, by1] = d.box, r = Math.max(bx1 - bx0, by1 - by0) / Math.max(1, Math.min(bx1 - bx0, by1 - by0));
+    let n = r < 10 ? 30 : r < 16 ? 50 : 100, text = await ndlReadLine(canvas, d.box, n);
+    if (n === 30 && text.length >= 25) { n = 50; text = await ndlReadLine(canvas, d.box, 50); }
+    if (n === 50 && text.length >= 45) { n = 100; text = await ndlReadLine(canvas, d.box, 100); }
+    if (n === 100 && text.length >= 98 && d.box[3] - d.box[1] < d.box[2] - d.box[0]) {
+      const [x0, y0, x1, y1] = d.box, xm = (x0 + x1) >> 1;
+      text = await ndlReadLine(canvas, [x0, y0, xm, y1], 100) + await ndlReadLine(canvas, [xm, y0, x1, y1], 100);
+    }
+    lines.push({ box: d.box, text, conf: d.conf });
+  }
+  return lines;
+}
+
+// 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
+const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
+async function ndlCached() {
+  try { const c = await caches.open(NDL.ver); const ks = await c.keys(); return ['deim', 'parseq30', 'parseq50', 'parseq100'].every(n => ks.some(k => k.url.endsWith('/' + n + '.onnx'))); } catch (e) { return false; }
+}
+// 撮影画像を向きを直して読み込む（色はそのまま。長辺3000pxまで）
+async function ndlCanvas(src) {
+  let bmp = src;
+  if (!(src instanceof HTMLCanvasElement)) {
+    try { bmp = await createImageBitmap(src, { imageOrientation: 'from-image' }); }
+    catch (e) { bmp = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = URL.createObjectURL(src); }); }
+  }
+  const W = bmp.width || bmp.naturalWidth, H = bmp.height || bmp.naturalHeight, sc = Math.min(1, 3000 / Math.max(W, H));
+  if (sc === 1 && src instanceof HTMLCanvasElement) return src;
+  const c = document.createElement('canvas'); c.width = Math.round(W * sc); c.height = Math.round(H * sc);
+  const g = c.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high';
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  return c;
+}
+// NDLOCRの半角濁点（ﾞ）は「'」として出るので、直前のカナと合わせる（ﾟも同じ記号になるが、照合では濁点・半濁点を区別しない）
+function ndlFixKana(t) {
+  return t.replace(/([カ-トハ-ホウｦ-ﾝ])\s*['’"”]/g, (m, ch) => {
+    if (ch === 'ウ') return 'ヴ';
+    const v = String.fromCharCode(ch.charCodeAt(0) + 1);
+    return /[ガ-ドバ-ボ]/.test(v) ? v : ch;
+  });
+}
+function ndlFixKanaRest(t) {
+  return t.replace(/([ァ-ヴー])['’"”]/g, '$1');   // 既に濁点が付いた字などの後ろに残った記号は外す
+}
+// 末尾の数量（1錠・50g・7枚など）。名前の規格（5mg、0.5%）は含めない
+const NDL_DOSE = /^(.*?[^\d.,])\s*((?:\d+(?:[.,]\d+)?)\s*(?:錠|カプセル|Cap|cap|包|枚|本|個|瓶|袋|筒|キット|吸入|滴|噴霧|g|ｇ|mL|ml|m[1lI])|[×xX]\s*\d+\s*(?:日分|回分|調剤))\s*$/;
+// 行（文字列と枠）→ 解析用の形式。1文字ずつ位置を割り振り、末尾の数量は右端の列に置く
+function ndlToPage(lines) {
+  const out = [];
+  for (const l of lines) {
+    const [x0, y0, x1, y1] = l.box, h = y1 - y0;
+    if (x1 - x0 < h) continue;                    // 縦書きは対象外
+    let t = ndlFixKanaRest(ndlFixKana(normalize(l.text))).replace(/\s+/g, ' ').trim()
+      .replace(/(\d)[OoＯ](?=\s*(?:m[lLI1]|g|錠|%|\d))/g, '$10')            // 「6Oml」→「60mL」
+      .replace(/『/g, '「').replace(/』/g, '」')
+      .replace(/(^|[一-龥])[-－‐](?=[一-龥])/g, '$1一');                     // 「-宮市」→「一宮市」
+    if (!t) continue;
+    const segs = [];
+    const m = t.match(NDL_DOSE);
+    if (m && m[1].trim() && !/[×xX]/.test(m[2])) {
+      const dose = m[2].replace(/\s+/g, '').replace(/m[1lI]$/, 'mL').replace(/,/, '.');
+      const dw = Math.min((x1 - x0) * 0.25, h * 0.9 * dose.length);
+      segs.push([m[1].trim(), x0, Math.max(x0 + 1, x1 - dw - h * 3)], [dose, x1 - dw, x1]);
+    } else segs.push([t, x0, x1]);
+    const words = [];
+    for (const [s, a, b] of segs) {
+      if (segs.length > 1 && s === segs[1][0]) { words.push({ text: s, bbox: { x0: Math.round(a), y0, x1: Math.round(b), y1 } }); continue; }   // 数量は1語のまま
+      const chars = Array.from(s), cw = (b - a) / Math.max(1, chars.length);
+      chars.forEach((ch, k) => { if (ch !== ' ') words.push({ text: ch, bbox: { x0: Math.round(a + k * cw), y0, x1: Math.round(a + (k + 1) * cw), y1 } }); });
+    }
+    if (words.length) out.push({ bbox: { x0, y0, x1, y1 }, words, ndlText: t });
+  }
+  return out;
 }
 
 function ocrImage(src) {
@@ -813,6 +1026,33 @@ function ocrImage(src) {
   const llmJob = llmReady() ? llmReadImage(src).then(j => ({ j }), e => ({ err: e.message || String(e) })) : null;
   OCR.queue = OCR.queue.then(async () => {
     try {
+      if (ocrEngine() === 'ndl') {
+        let lines = null, ndlErr = '';
+        try {
+          const cv = await ndlCanvas(src);
+          const raw = await ndlRecognize(cv, (t, p) => ocrStatus(t + (OCR.pending > 1 ? `（残り${OCR.pending}枚）` : ''), p));
+          lines = ndlToPage(raw);
+        } catch (e) { console.error(e); ndlErr = e?.message || String(e); }
+        if (lines) {
+          const text = lines.map(l => l.ndlText).join('\n');
+          let llm = null, llmErr = '';
+          if (llmJob) {
+            ocrStatus('LLMサーバで読み取り中…（30秒ほどかかります）', 0.9);
+            const r = await llmJob;
+            if (r.j) llm = r.j; else llmErr = r.err;
+          }
+          OCR.pages++;
+          appendScanText(text);
+          ui.scanPages = [...(ui.scanPages || []), { text, lines, wide: [], engine: 'ndl', llm, llmErr }];
+          try { window.__jishiyakuOcr = ui.scanPages; } catch (e) {}
+          ui.scanPagesText = ui.scanText;
+          OCR.pending--;
+          const llmNote = llmJob ? (llm ? '（LLMで読み取り）' : `（LLMは使えませんでした：${llmErr}。端末内のOCRで読み取りました）`) : '';
+          ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `${OCR.pages}ページ読み取りました${llmNote}。内容を確認して「解析する」を押してください。`, 1);
+          return;
+        }
+        ocrStatus(`NDLOCR-Liteを使えなかったため、Tesseractで読み取ります（${ndlErr}）`, 0);
+      }
       const canvas = await prepareImage(src);
       const w = await getWorker();
       const { data } = await w.recognize(canvas, {}, { text: true, blocks: true });
@@ -930,7 +1170,8 @@ async function camOpen(mode = 'ocr') {
   $('#cam').hidden = false;
   if (gs1) return true;
   ocrStatus(OCR.status);
-  getWorker().catch(() => {});   // 撮影中にエンジンを準備しておく
+  if (ocrEngine() === 'ndl') ndlLoad((t, p) => { if (!OCR.pending) ocrStatus(t, p); }).then(() => { if (!OCR.pending) ocrStatus(''); }).catch(() => {});   // 撮影中にエンジンを準備しておく
+  else getWorker().catch(() => {});
   return true;
 }
 function camClose() {
@@ -996,7 +1237,7 @@ function isDrugLine(s) {
 }
 function clinicName(s) {
   if (/[。、!！?？]|(した|かった|ので|ます|でした|ません|にかか)/.test(s) || s.length > 30) return null;
-  if (!CLINIC.test(s) || PHARM.test(s) || /(診療科|科名|紹介)/.test(s) || isDrugLine(s)) return null;
+  if (!CLINIC.test(s) || PHARM.test(s) || /(診療科|科名|紹介|医師|担当)/.test(s) || isDrugLine(s)) return null;
   let t = s.replace(/(処方)?(医療機関名?|病院名|医院名|処方元)\s*[:：]?/g, ' ');
   t = t.replace(/(令和|平成|R|H)?\s*\d{1,4}\s*[年\/.\-]\s*\d{1,2}\s*[月\/.\-]\s*\d{1,2}\s*日?/g, ' ');
   const tk = t.split(/\s+/).filter(Boolean);
@@ -1428,11 +1669,24 @@ function bestNameSuffix(words, h) {
   }
   return best;
 }
+// 行の後ろに余計な文字（含量の補足・用法など）が続く場合：規格や「」の切れ目で後ろを切り落として照合する
+function bestNamePrefix(bare) {
+  const cuts = new Set([bare.length]);
+  for (const m of bare.matchAll(/\d+(?:\.\d+)?\s*(?:mg|μg|g|mL|%|単位|噴霧用|吸入用)|」|錠|カプセル|軟膏|クリーム|テープ|液|散|顆粒/g)) cuts.add(m.index + m[0].length);
+  let best = null;
+  for (const n of [...cuts].sort((a, b) => b - a)) {
+    const cand = bare.slice(0, n).trim();
+    if (cand.replace(/[^ァ-ヴA-Za-z一-龥]/g, '').length < 3) continue;
+    const top = searchMaster(cand, 2);
+    if (top[0] && (!best || top[0].sim > best.sim + 0.05)) best = { i: 0, cand, sim: top[0].sim, score: top[0].sim, top: top[0], second: top[1] };
+  }
+  return best;
+}
 const cleanTail = t => t.replace(/[\s|｜:：;,、。]+$/, '').replace(/(\s*[ー\-]{2,}|\s+\d)$/, '').trim();
 const RX_LINE = /(一般名|【般】|\[般\]|\(般\)|（般）|〔般〕|^般)/;
 function stripMarks(t) {
-  t = t.replace(/^\s*[\[［(（]?\s*\d{1,2}\s*[\]］)）]\s*/, '').replace(/^\s*\d{1,2}\s+(?=[ァ-ヴA-Za-z一-龥])/, '');
-  return t.replace(/^[^ァ-ヴA-Za-z0-9一-龥ぁ-ん【]*(?:\((?:内|外|頓|注|屯)\)|（(?:内|外|頓|注|屯)）)?[^ァ-ヴA-Za-z0-9一-龥ぁ-ん【]*/, '').trim();
+  t = t.replace(/^\s*[\[［(（【〔]?\s*\d{1,2}\s*[\]］)）】〕]\s*/, '').replace(/^\s*\d{1,2}\s+(?=[ァ-ヴA-Za-z一-龥])/, '');
+  return t.replace(/^[^ァ-ヴA-Za-z0-9一-龥ぁ-ん【]*?(?:\((?:内|外|頓|注|屯)\)|（(?:内|外|頓|注|屯)）)?[^ァ-ヴA-Za-z0-9一-龥ぁ-ん【]*/, '').trim();
 }
 
 function parseLayout(pages) {
@@ -1444,6 +1698,7 @@ function parseLayout(pages) {
   };
   const drugAt = r => r && clinics[r[0]].drugs[r[1]];
   for (const page of pages) {
+    const ndl = page.engine === 'ndl';
     const lines = (page.lines || []).map(l => ({
       y0: l.bbox.y0, y1: l.bbox.y1, h: Math.max(8, l.bbox.y1 - l.bbox.y0),
       words: l.words.map(w => ({ t: ocrWord(w.text), x0: w.bbox.x0, x1: w.bbox.x1 })).filter(w => w.t)
@@ -1461,7 +1716,8 @@ function parseLayout(pages) {
     for (const l of lines) {
       const { dose, left, x0: doseX0 } = splitDose(l.words, W, l.h);
       const text = joinWords(left, l.h);
-      const bare = stripMarks(text).replace(/^[|｜]\s*/, '');
+      let bare = stripMarks(text).replace(/^[|｜]\s*/, '');
+      if (ndl) bare = bare.replace(/^\d{1,2}(?=[ァ-ヴ])/, '');   // 「1ロキソプロフェン…」の行番号
 
       // 医療機関・ノイズ
       const cn = text && clinicName(bare.replace(/^.*?医療機関名?\s*[:：]\s*/, ''));
@@ -1483,7 +1739,7 @@ function parseLayout(pages) {
       // 「(0.5g)」のような括弧書きの量 → 直前の薬の補足
       if (/^[(（]?\s*\d+(?:\.\d+)?\s*[a-zA-Z錠枚包]+\s*[)）]?$/.test(bare)) {
         const d = drugAt(lastDrug);
-        if (d) d.note = (d.note ? d.note + ' ' : '') + bare;
+        if (d) { d.note = (d.note ? d.note + ' ' : '') + bare; if (dose && !d.dose) d.dose = dose; }
         continue;
       }
       // 一般名（処方箋記載名）の行
@@ -1498,13 +1754,17 @@ function parseLayout(pages) {
       const usageLike = su.found && (su.times.length || su.perDay || su.days || su.prn.length || su.prnFlag || su.freq || su.meal || su.ext.length);
       let match = null;
       if (Master.ready && bare) match = bestNameSuffix(left, l.h);
+      if (ndl && Master.ready && bare && (!match || match.sim < 0.85)) { const p = bestNamePrefix(bare); if (p && (!match || p.sim > match.sim + 0.02)) match = p; }
       let drugLike = (match && match.score >= 0.5) || isDrugLine(bare) || (!!dose && /[ァ-ヴー]{3,}/.test(bare));
+      // NDLOCRは行頭の番号・記号まで正確に読むので、「[1]」「【1】」「(内)◇」「◇」で始まる行は薬の行とみなす
+      const marked = ndl && /^\s*(?:[\[［【〔(（]\s*\d{1,2}\s*[\]］】〕)）]|\d{1,2}(?=[ァ-ヴA-Za-z])|(?:[(（][内外頓注屯][)）])?\s*[◇□■●○])/.test(text) && !/^\s*◆/.test(text) && /[ァ-ヴA-Za-z一-龥]{2,}/.test(bare);
+      if (marked) drugLike = true;
       let alt = [];
       if (Master.ready && !usageLike && (dose || drugLike) && (!match || match.sim < 0.85)) {
         alt = wideCands(l, doseX0, bare);
         if (alt[0] && alt[0].sim >= 0.5 && (!match || alt[0].sim > match.sim)) drugLike = true;
       }
-      if (usageLike && (!drugLike || su.startStrict === 0 || (match && match.sim < 0.65))) {
+      if (usageLike && !marked && (!drugLike || su.startStrict === 0 || (match && match.sim < 0.65))) {
         let targets = prevKind === 'usage' ? lastGroup : waiting.length ? waiting : lastDrug ? [lastDrug] : [];
         const utext = su.text.replace(/^[^0-9A-Za-zぁ-んァ-ヴ一-龥]+/, '').trim();   // 読み残しも残して⚠で知らせる
         for (const r of targets) { const d = drugAt(r); d.usage = d.usage ? d.usage + ' ' + utext : utext; }
@@ -1513,12 +1773,13 @@ function parseLayout(pages) {
       }
       // 薬品名の行
       if (drugLike) {
-        const name = match ? match.cand : splitDrugLine(bare).name;
+        // NDLOCRの行は余計な文字が少ないので、行全体を名前にする（確定すればマスターの名前に置き換わる。マスターにない薬の頭が欠けないように）
+        const name = ndl ? bare : match ? match.cand : splitDrugLine(bare).name;
         const d = newDrug(cleanName(name), dose, '');
         if (alt.length && alt[0].sim >= 0.7 && (!match || alt[0].sim > match.sim)) d.cands = alt;   // 半角カナなど：確かな候補だけ出す
         if (match) {
           d.rawName = name;
-          if (match.sim >= 0.85 && (!match.second || match.sim - match.second.sim >= 0.04)) applyMaster(d, match.top, match.sim);
+          if (match.sim >= 0.85 && (!match.second || match.sim - match.second.sim >= 0.04) && strengthOK(bare, match.top.n)) applyMaster(d, match.top, match.sim);
         }
         const c = ci();
         clinics[c].drugs.push(d);
@@ -1750,11 +2011,20 @@ function applyMaster(d, it, sim, gtin) {
   d.matchSim = sim;
   if (gtin) d.gs1 = gtin;
 }
-// 自動適用は「十分に似ていて、2位と差がある」ときだけ
+// 規格の数字（5mg・0.5%・250mg など）が読み取った名前と候補で食い違うときは自動で確定しない
+function strengthNums(s) {
+  return [...normalize(String(s || '')).replace(/(\d),(\d)/g, '$1.$2').matchAll(/(\d+(?:\.\d+)?)\s*(?:mg|μg|g|mL|%|単位|万単位)/g)].map(m => String(+m[1]));
+}
+function strengthOK(read, cand) {
+  const a = strengthNums(read);
+  if (!a.length) return true;
+  return strengthNums(cand).includes(a[0]);   // 最初に書かれた規格（主成分の含量）が候補にあること
+}
+// 自動適用は「十分に似ていて、2位と差があり、規格が一致する」ときだけ
 function autoMatch(d) {
   if (!Master.ready || d.yj || !(d.name || '').trim()) return;
   const c = searchMaster(d.name, 2);
-  if (c[0] && c[0].sim >= 0.92 && (!c[1] || c[0].sim - c[1].sim >= 0.03)) applyMaster(d, c[0], c[0].sim);
+  if (c[0] && c[0].sim >= 0.92 && (!c[1] || c[0].sim - c[1].sim >= 0.03) && strengthOK(d.name, c[0].n)) applyMaster(d, c[0], c[0].sim);
 }
 const matched = d => !!d.yj || d.matchSim === 1;
 
@@ -2750,6 +3020,32 @@ const PANELS = {
     };
   },
 
+  ocr() {
+    const e = ocrEngine(), p = ui.panel;
+    const opt = (v, t, d) => `<button data-act="ocrSet" data-v="${v}" aria-pressed="${e === v}" style="display:block;width:100%;text-align:left;font:inherit;color:inherit;margin:0 0 8px;padding:12px 14px;border-radius:12px;cursor:pointer;${e === v ? 'border:2px solid #0e6a5a;background:#eef6f3' : 'border:1px solid #c9d2cf;background:#fff'}">
+      <div style="font-weight:600;margin-bottom:2px">${e === v ? '◉' : '○'} ${t}</div><div class="muted" style="margin:0">${d}</div></button>`;
+    return {
+      title: '端末内の読み取り（OCR）',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>読み取りエンジン</h3>
+          ${opt('ndl', 'NDLOCR-Lite（おすすめ）', '日本語の印刷物に強いOCR。初回だけモデル（約80MB）をダウンロードし、以後はオフラインで動きます。1ページ10秒前後。')}
+          ${opt('tess', 'Tesseract', '軽くて準備が早いが、精度は低め（半角カナ・影に弱い）。')}
+        </div>
+        ${e === 'ndl' ? `<div class="block">
+          <h3>モデルのダウンロード</h3>
+          <p class="muted" id="ocrDlMsg" role="status">${esc(p.msg || (p.cached ? 'この端末に保存済みです。' : p.cached === false ? 'まだダウンロードしていません。Wi-Fiにつないだ状態でダウンロードしておくと、初回の読み取りが早くなります。' : '確認中…'))}</p>
+          <button class="btn primary" data-act="ocrDownload">${p.cached ? 'もう一度準備する' : '今ダウンロードする（約80MB）'}</button>
+        </div>` : ''}
+        <div class="block">
+          <h3>使用しているOCR</h3>
+          <p class="muted">NDLOCR-Lite：国立国会図書館（NDLラボ）が公開しているOCRのモデル（CC BY 4.0）を、この端末のブラウザ内で動かしています（<a href="https://github.com/ndl-lab/ndlocr-lite" target="_blank" rel="noopener">github.com/ndl-lab/ndlocr-lite</a>）。重みを16bitで保存し直して容量を半分にしたほかは、元のモデルのままです。実行には ONNX Runtime Web（MIT）を使っています。</p>
+          <p class="muted">Tesseract.js（Apache 2.0）。写真はどちらのエンジンでも端末の外には送られません。</p>
+        </div>`
+    };
+  },
+
   llm() {
     const c = llmCfg(), p = ui.panel;
     return {
@@ -2818,6 +3114,7 @@ const PANELS = {
         <div class="menu-list">
           <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
           <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
+          ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="ocrPanel">端末内の読み取り（${ocrEngine() === 'ndl' ? 'NDLOCR-Lite' : 'Tesseract'}）</button>` : ''}
           ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="llmPanel">LLMサーバ（${llmReady() ? '有効' : '無効'}）</button>` : ''}
           <button class="btn" data-act="masterPanel">医薬品マスター（${Master.ready ? Master.items.length.toLocaleString() + '品目' : '未取り込み'}）</button>
           <button class="btn" data-act="scanFromMenu">お薬手帳を読み取る</button>
@@ -3269,6 +3566,17 @@ const actions = {
   // マスター
   masterPanel: () => openPanel({ type: 'master' }),
   llmPanel: () => openPanel({ type: 'llm' }),
+  ocrPanel: () => { openPanel({ type: 'ocr' }); ndlCached().then(v => { if (ui.panel?.type === 'ocr') { ui.panel.cached = v; renderPanel(); } }); },
+  ocrSet: el => { try { localStorage.setItem('jishiyaku.ocr', el.dataset.v); } catch (e) {} renderPanel(); },
+  ocrDownload: async () => {
+    const msg = t => { ui.panel.msg = t; const m = $('#ocrDlMsg'); if (m) m.textContent = t; };
+    msg('準備中…');
+    try {
+      await ndlLoad(t => msg(t));
+      ui.panel.cached = await ndlCached(); ui.panel.msg = 'この端末に保存しました。オフラインでも読み取れます。';
+    } catch (e) { ui.panel.msg = 'ダウンロードできませんでした。通信状態を確認して、もう一度お試しください。（' + (e?.message || e) + '）'; }
+    if (ui.panel?.type === 'ocr') renderPanel();
+  },
   llmTest: async () => {
     const msg = t => { ui.panel.msg = t; const m = $('#llmMsg'); if (m) m.textContent = t; };
     msg('確認中…');
