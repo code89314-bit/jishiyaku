@@ -294,6 +294,22 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .prep-when { display: flex; align-items: center; gap: 8px; margin: 8px 0; white-space: nowrap; }
 .prep-when input { height: 40px; font: inherit; font-size: 16px; }
 .ins input[type=date] { font: inherit; font-size: 16px; height: 40px; }
+.rc-set { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 4px 0 8px; }
+.rc-set > div { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; }
+.rc-set small { display: block; font-size: 11px; color: var(--ink-2, #666); }
+.rc-set b { font-size: 16px; }
+.rc-slot { border-top: 1px solid var(--line); padding: 6px 0; }
+.rc-sh { display: flex; gap: 10px; align-items: baseline; margin: 2px 0; }
+.rc-sh b { font-size: 16px; min-width: 2.6em; }
+.rc-pc { margin-left: auto; font-weight: 700; color: var(--pack); }
+.rc-short { color: var(--warn); font-weight: 700; }
+.rc-it { display: grid; grid-template-columns: 1.8em minmax(0, 1fr) auto; gap: 4px; align-items: baseline; padding: 1px 0 1px 2.6em; font-size: 14px; }
+.rc-it .rp-no { font-size: 15px; }
+.rc-grid { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; width: 100%; table-layout: fixed; }
+.rc-grid caption { text-align: left; font-size: 11.5px; color: var(--ink-2, #666); padding-bottom: 2px; }
+.rc-grid th, .rc-grid td { border: 1px solid var(--line); padding: 3px 1px; text-align: center; }
+.rc-grid th { font-weight: 600; background: var(--bg); }
+.rc-grid td.e { background: repeating-linear-gradient(45deg, #f4f4f4, #f4f4f4 4px, #e6e6e6 4px, #e6e6e6 8px); color: #888; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
 .warnline { margin: 0; color: var(--warn); font-weight: 700; }
@@ -2719,6 +2735,159 @@ function parseNumberList(t) {
 }
 const RPT_TIMES = [['起床時', 'wake'], ['朝', 'morning'], ['昼', 'noon'], ['夕', 'evening'], ['眠前', 'bedtime'], ['就寝前', 'bedtime'], ['寝る前', 'bedtime']];
 
+
+/* ================= 分包のレシピ（持参薬の継続分を分包機で作る） =================
+   ・医院ごとに1包化、下剤は別包。持参の一包化（包のまま）は分包機で作らない
+   ・開始：用意済みの「まで」の次の時点（途中から始まる日は分包機の開始日をその日にして、前のマスを空ける）
+   ・終わり：病棟の定期日に合わせる（前日の最後まで／定期日の朝まで など）。退院日が決まっていれば退院日の朝まで
+   ・分包機は「開始日の朝から◯日分」。用法が毎食後なら 朝朝朝…・昼昼昼…・夕夕夕… の順にマスが並ぶ */
+const RC_T = ['起床時', '朝', '昼', '夕', '就寝前'];
+const rcLabel = t => t === '就寝前' ? '眠前' : t;
+const LAXATIVE = /酸化マグネシウム|酸化Mg|マグミット|マグラックス|ミルマグ|重カマ|グーフィス|エロビキシバット|アミティーザ|ルビプロストン|リンゼス|リナクロチド|モビコール|センノシド|センナ|プルゼニド|アローゼン|ピコスルファート|ラキソベロン|スインプロイク|ナルデメジン|ビサコジル|ラクツロース|モニラック|ラグノス|大建中湯|麻子仁丸|潤腸湯|大黄甘草湯/;
+const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+// 日付（YYYY-MM-DD）
+const dISO = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const dParse = iso => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
+const dAdd = (iso, n) => { const d = dParse(iso); d.setDate(d.getDate() + n); return dISO(d); };
+const dDiff = (a, b) => Math.round((dParse(b) - dParse(a)) / 864e5);
+const dMD = iso => { const d = dParse(iso); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const dMDW = iso => { const d = dParse(iso); return `${d.getMonth() + 1}/${d.getDate()}(${WEEKDAYS[d.getDay()]})`; };
+// 時点の比較用：[日付, 時点の番号 0〜4]
+const ptCmp = (a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1];
+// 用意済み（〇/〇 時点 まで）→ 次に作り始める時点
+function rcStartAfter(prep) {
+  const iso = mdToISO(prep.until);
+  if (!iso) return null;
+  const t = prep.time ? RC_T.indexOf(prep.time === '眠前' ? '就寝前' : prep.time) : 4;
+  return t >= 4 ? [dAdd(iso, 1), 0] : [iso, t + 1];
+}
+// 終わりの時点：病棟の定期日に合わせる（開始より後になる最初の定期日）。退院日が早ければ退院日の朝
+function rcEnd(start, ward, discharge) {
+  const endT = ward.end === 'prev' ? null : RC_T.indexOf(ward.end);
+  let r = start[0];
+  for (let i = 0; i < 15; i++, r = dAdd(r, 1)) {
+    if (dParse(r).getDay() !== ward.weekday) continue;
+    const e = endT == null ? [dAdd(r, -1), 4] : [r, endT];
+    if (ptCmp(e, start) >= 0) { r = e; break; }
+  }
+  let end = Array.isArray(r) ? r : [dAdd(start[0], 6), 4];
+  if (discharge) { const d = [discharge, 1]; if (ptCmp(d, end) < 0) end = d; }
+  return end;
+}
+// 1つの時点の量（レポートの薬）。null＝その時点には飲まない
+function rcAmountAt(d, t) {
+  const U = d.u || {};
+  if (U.prn) return { skip: '頓用' };
+  if (d.ext || U.ext) return { skip: '外用' };
+  if (U.freq) return { skip: U.freq };
+  const num = v => { const m = String(v || '').normalize('NFKC').replace(/^1回/, '').match(/^(\d+(?:\.\d+)?)\s*(\D*)$/); return m ? [+m[1], m[2] || ''] : null; };
+  const dd = num(d.dose), unitD = (dd && dd[1]) || '錠';
+  if (U.unequal) {
+    const map = {};
+    for (const m of String(U.unequal).normalize('NFKC').matchAll(/(起床時?|朝|昼|夕|就寝前|眠前|寝る前)\s*(\d+(?:\.\d+)?)\s*(錠|カプセル|C|丸|個|包|g|mL)?/g))
+      map[/寝|眠/.test(m[1]) ? '就寝前' : /起床/.test(m[1]) ? '起床時' : m[1]] = [+m[2], m[3] || unitD];
+    if (Object.keys(map).length) return map[t] ? { amt: map[t][0], unit: map[t][1] } : null;
+  }
+  const times = U.times || [];
+  if (!times.length) return { unknown: '服用時点がわかりません' };
+  if (!times.includes(t)) return null;
+  const pd = num(U.perDose);
+  if (pd) return { amt: pd[0], unit: pd[1] || unitD };
+  if (!dd) return { unknown: '1日量がわかりません' };
+  const n = U.perDay || times.length, a = dd[0] / n;
+  if (Math.abs(a - Math.round(a)) > 1e-6 && (Number.isInteger(dd[0]) || Math.abs(a * 2 - Math.round(a * 2)) > 1e-6))
+    return { unknown: `1日${d.dose}・${n}回では時点ごとの量が決まりません` };
+  return { amt: a, unit: dd[1] || unitD };
+}
+const rcUnit = u => u === 'C' ? 'カプセル' : u || '錠';
+// レシピの条件（病棟の定期日・終わり方、初回の開始、退院日、別包にする薬）はこの端末に保存
+const RCP = (() => {
+  let o = {};
+  try { o = JSON.parse(localStorage.getItem('jishiyaku.rcp') || '{}'); } catch (e) {}
+  const t = new Date();
+  return { wards: o.wards?.length ? o.wards : [{ name: '病棟', weekday: 4, end: 'prev' }], ward: o.ward || 0,
+    start: o.start || [dISO(t), 2], discharge: '', lax: {}, remain: {}, editWard: false, msg: '' };
+})();
+const rcpSave = () => { try { localStorage.setItem('jishiyaku.rcp', JSON.stringify({ wards: RCP.wards, ward: RCP.ward, start: RCP.start })); } catch (e) {} };
+const rcWard = () => RCP.wards[RCP.ward] || RCP.wards[0];
+const rcRecipe = () => buildRecipe(RPT.doc, RPT.instr, { ward: rcWard(), discharge: RCP.discharge, start: RCP.start, lax: RCP.lax });
+// レシピの終わりを、指示の「用意済み」に書き込む（同じ日付・時点・残薬の行はまとめる）
+function rcApply() {
+  const R = rcRecipe(), ins = RPT.instr;
+  const done = [...R.batches, ...R.packs];
+  const nums = new Set(done.flatMap(b => b.nums));
+  const preps = ins.preps.map(p => ({ ...p, nums: p.nums.filter(n => !nums.has(n)) })).filter(p => p.nums.length);
+  for (const b of done) {
+    const remain = RCP.remain[b.key] ?? !!b.prep?.remain;
+    const same = preps.find(p => p.until === b.until && p.time === b.untilTime && p.remain === remain);
+    if (same) same.nums = [...new Set([...same.nums, ...b.nums])].sort((x, y) => x - y);
+    else preps.push({ nums: [...b.nums], until: b.until, time: b.untilTime, remain });
+  }
+  preps.sort((a, b) => a.nums[0] - b.nums[0]);
+  ins.preps = preps;
+  return done.length;
+}
+
+// レシピ全体
+function buildRecipe(doc, ins, opt) {
+  const R = { batches: [], packs: [], skipped: [], unknown: [], notCont: [] };
+  if (!doc || !ins) return R;
+  const cont = new Set(ins.contAll ? doc.drugs.map(d => d.no) : ins.cont);
+  const prepOf = n => ins.preps.find(p => p.nums.includes(n));
+  const groups = new Map();
+  for (const d of doc.drugs) {
+    if (!cont.has(d.no)) continue;
+    const prep = prepOf(d.no);
+    const start = (prep && rcStartAfter(prep)) || opt.start;
+    if (!start) { R.unknown.push({ d, why: '開始の日付がわかりません' }); continue; }
+    // 頓用・外用・週1回などは分包機の対象外
+    const probe = RC_T.map(t => rcAmountAt(d, t));
+    const skip = probe.find(a => a && a.skip);
+    if (skip) { R.skipped.push({ d, why: skip.skip }); continue; }
+    const unk = probe.find(a => a && a.unknown);
+    if (unk) { R.unknown.push({ d, why: unk.unknown }); continue; }
+    const lax = opt.lax[d.no] ?? LAXATIVE.test(d.name || '');
+    const brought = !!d.pack;
+    const key = [brought ? 'P' : 'M', d.clinic, lax && !brought ? 'L' : '', start.join('|')].join('#');
+    if (!groups.has(key)) groups.set(key, { key, clinic: d.clinic, lax: lax && !brought, brought, start, drugs: [], prep });
+    groups.get(key).drugs.push(d);
+  }
+  for (const g of groups.values()) {
+    const end = rcEnd(g.start, opt.ward, opt.discharge);
+    const used = RC_T.filter(t => g.drugs.some(d => { const a = rcAmountAt(d, t); return a && a.amt; }));
+    const idx = used.map(t => RC_T.indexOf(t));
+    // 最初の日・最後の日に入るマスがなければ、その日は外す
+    let s = g.start, e = end;
+    if (!idx.some(i => i >= s[1])) s = [dAdd(s[0], 1), 0];
+    if (!idx.some(i => i <= e[1])) e = [dAdd(e[0], -1), 4];
+    const days = dDiff(s[0], e[0]) + 1;
+    if (days <= 0) { g.drugs.forEach(d => R.skipped.push({ d, why: '次の定期日（退院日）までに飲む分は用意済み' })); continue; }
+    const dates = Array.from({ length: days }, (_, i) => dAdd(s[0], i));
+    const cell = (iso, i) => !(iso === s[0] && i < s[1]) && !(iso === e[0] && i > e[1]);
+    const slots = used.map(t => {
+      const i = RC_T.indexOf(t);
+      const items = g.drugs.map(d => ({ d, a: rcAmountAt(d, t) })).filter(x => x.a && x.a.amt);
+      const cells = dates.filter(iso => cell(iso, i));
+      const pieces = items.filter(x => COUNTABLE.test(rcUnit(x.a.unit))).reduce((a, x) => a + Math.ceil(x.a.amt - 1e-9), 0);
+      return { t, i, items, cells, empty: dates.filter(iso => !cell(iso, i)), pieces };
+    }).filter(sl => sl.cells.length);
+    const totals = g.drugs.map(d => {
+      let amt = 0, unit = '';
+      for (const sl of slots) { const x = sl.items.find(y => y.d === d); if (x) { amt += x.a.amt * sl.cells.length; unit = rcUnit(x.a.unit); } }
+      const daily = RC_T.reduce((a, t) => { const x = rcAmountAt(d, t); return a + (x && x.amt ? x.amt : 0); }, 0);
+      const halves = slots.reduce((a, sl) => { const x = sl.items.find(y => y.d === d); return a + (x && x.a.amt % 1 ? sl.cells.length : 0); }, 0);
+      return { d, amt, unit, next7: daily * 7, halves };
+    });
+    if (!slots.length) { g.drugs.forEach(d => R.skipped.push({ d, why: '次の定期日（退院日）までに飲む分は用意済み' })); continue; }
+    const endTime = e[1] >= Math.max(...idx) ? '' : rcLabel(RC_T[e[1]]);
+    const out = { ...g, s, e, days, dates, slots, totals, until: dMD(e[0]), untilTime: endTime, nums: g.drugs.map(d => d.no) };
+    (g.brought ? R.packs : R.batches).push(out);
+  }
+  const ord = b => [b.clinic, b.lax ? 1 : 0, b.s[0], b.s[1]].join('|');
+  R.batches.sort((a, b) => doc.clinics.findIndex(c => c.name === a.clinic) - doc.clinics.findIndex(c => c.name === b.clinic) || (a.lax - b.lax) || ptCmp(a.s, b.s));
+  return R;
+}
+
 /* ---- 指示（区切り「＊＊＊＊」より下）----
    【10/23指示】
    病棟管理　①②③継続
@@ -3038,6 +3207,13 @@ function renderPanel(resetScroll) {
 }
 
 
+// 短い名前：先頭のカタカナ等（10文字まで）＋最初の規格（例：メトホルミン 250mg）
+function rptShort(d) {
+  const n = (d.name || '').replace(/「[^」]*」/g, '').replace(/\s+/g, '');
+  const head = (n.split(/錠|カプセル|散|顆粒|細粒|液|シロップ|テープ|軟膏|\d/)[0] || n.slice(0, 6)).slice(0, 10);
+  const st = (n.match(/\d+(?:\.\d+)?(?:mg|μg|g|%)/) || [''])[0];
+  return head + (st ? ' ' + st : '');
+}
 // 指示の入力フォーム（番号は薬品名つきのボタンで選ぶ。丸数字を読まなくてよい）
 function instrForm(doc) {
   const ins = RPT.instr;
@@ -3045,13 +3221,7 @@ function instrForm(doc) {
       <p class="muted">レポートに指示（＊＊＊＊の区切りより下）がありません。</p>
       <button class="btn primary" data-act="insNew">指示を入力する</button></div>`;
   const byNo = new Map(doc.drugs.map(d => [d.no, d]));
-  // 短い名前：先頭のカタカナ等（9文字まで）＋最初の規格（例：メトホルミン 250mg）
-  const nm = d => {
-    const n = (d.name || '').replace(/「[^」]*」/g, '').replace(/\s+/g, '');
-    const head = (n.match(/^[ァ-ヴー・A-Za-zＡ-Ｚ]{2,}/) || [n.slice(0, 6)])[0].slice(0, 9);
-    const st = (n.match(/\d+(?:\.\d+)?(?:mg|μg|g|%)/) || [''])[0];
-    return head + (st ? ' ' + st : '');
-  };
+  const nm = rptShort;
   const chip = (act, d, on, extra = '') => `<button class="chip${on ? ' on' : ''}" data-act="${act}" data-n="${d.no}"${extra}>${circled(d.no)} ${esc(nm(d))}${d.u?.prn ? '<small>頓用</small>' : d.ext ? '<small>外用</small>' : ''}</button>`;
   const contSet = new Set(ins.contAll ? doc.drugs.map(d => d.no) : ins.cont);
   const stray = [...contSet].filter(n => !byNo.has(n));
@@ -3089,6 +3259,7 @@ function instrForm(doc) {
       <div class="field"><label for="insExtra">そのほかの指示（自由記載）</label><textarea id="insExtra" rows="2" style="width:100%;box-sizing:border-box">${esc(ins.extra.join('\n'))}</textarea></div>
       <div class="field"><label>指示の文（電子カルテに貼る用）</label><pre class="ins-out" id="insOut">${esc(instrText(ins))}</pre>
         <button class="btn primary" data-act="insCopy">コピー</button> <span class="muted" id="insCopyMsg"></span></div>
+      <button class="btn primary" data-act="recipe" style="width:100%;min-height:52px;margin-top:6px">分包のレシピを作る</button>
     </div>`;
 }
 
@@ -3465,6 +3636,82 @@ const PANELS = {
   },
 
 
+
+  recipe() {
+    const doc = RPT.doc, ins = RPT.instr, w = rcWard();
+    if (!doc || !ins) return { title: '分包のレシピ', left: `<button class="btn ghost" data-act="rptPanel">戻る</button>`, body: '<p class="muted">先に持参薬レポートと指示を読み取ってください。</p>' };
+    const R = rcRecipe();
+    const seg = (act, list, cur, extra = '') => list.map(([v, l]) => `<button class="seg${String(cur) === String(v) ? ' on' : ''}" data-act="${act}" data-v="${v}"${extra}>${l}</button>`).join('');
+    const nm = d => (d.name || '').replace(/「[^」]*」/g, '').replace(/\s+/g, '');
+    const amt = (x, u) => `${x === 0.5 ? '½' : Number.isInteger(x) ? x : Number.isInteger(x - 0.5) ? (x - 0.5) + '½' : x}${rcUnit(u)}`;
+    const cont = new Set(ins.contAll ? doc.drugs.map(d => d.no) : ins.cont);
+    const noPrep = doc.drugs.filter(d => cont.has(d.no) && !ins.preps.some(p => p.nums.includes(d.no)) && !d.u?.prn && !d.ext && !d.u?.freq), needStart = noPrep.length;
+    const endLabel = { prev: '定期日の前日の最後まで', '朝': '定期日の朝まで', '昼': '定期日の昼まで', '夕': '定期日の夕まで' };
+    const card = b => {
+      const empties = b.slots.flatMap(sl => sl.empty.map(iso => `${dMD(iso)} ${rcLabel(sl.t)}`));
+      const remain = RCP.remain[b.key] ?? !!b.prep?.remain;
+      return `<div class="block rc">
+        <h3>●${esc(b.clinic)}${b.lax ? '<span class="tag warn" style="margin-left:6px">下剤・別包</span>' : ''}<small>${numberRange(b.nums)}</small></h3>
+        <div class="rc-set">
+          <div><small>開始日</small><b>${dMDW(b.s[0])}</b></div>
+          <div><small>日数</small><b>${b.days}日分</b></div>
+          <div><small>用法</small><b>${b.slots.map(sl => rcLabel(sl.t)).join('・')}</b></div>
+        </div>
+        ${empties.length ? `<p class="warnline">空けるマス：${empties.join('、')}</p>` : ''}
+        ${b.slots.map(sl => `<div class="rc-slot">
+            <div class="rc-sh"><b>${rcLabel(sl.t)}</b><span>${sl.cells.length}マス</span><span class="rc-pc">1マスに ${sl.pieces}錠</span></div>
+            ${sl.items.map(x => `<div class="rc-it"><span class="rp-no">${circled(x.d.no)}</span><span>${esc(nm(x.d))}</span><b>${amt(x.a.amt, x.a.unit)}</b></div>`).join('')}
+          </div>`).join('')}
+        <table class="rc-grid"><caption>分包機のマス（上の段から、左から右へ）</caption>
+          <tr><th></th>${b.dates.map(iso => `<th>${dMD(iso)}</th>`).join('')}</tr>
+          ${b.slots.map(sl => `<tr><th>${rcLabel(sl.t)}</th>${b.dates.map(iso => sl.cells.includes(iso) ? `<td>${sl.pieces}</td>` : '<td class="e">空</td>').join('')}</tr>`).join('')}
+        </table>
+        <p class="muted rc-tot">使う量：${b.totals.map(t => `${circled(t.d.no)}${esc(rptShort(t.d))} ${amt(t.amt, t.unit)}${t.halves ? `（半錠${t.halves}個）` : ''}`).join('、')}</p>
+        <label class="pick" style="border:0;padding:4px 0"><input type="checkbox" class="rcRemain" data-k="${esc(b.key)}" ${remain ? 'checked' : ''} style="width:22px;height:22px">
+          <span>このあとも次の7日分を作れる（残薬あり）<br><small class="muted">次の7日分：${b.totals.map(t => `${circled(t.d.no)} ${amt(t.next7, t.unit)}`).join('、')}</small></span></label>
+      </div>`;
+    };
+    const tname = { '起床時': 'wake', '朝': 'morning', '昼': 'noon', '夕': 'evening', '就寝前': 'bedtime' };
+    const packCard = b => `<div class="block rc">
+        <h3>●${esc(b.clinic)}<span class="tag pack" style="margin-left:6px">持参の一包化（包のまま）</span><small>${numberRange(b.nums)}</small></h3>
+        <p class="muted">${dMDW(b.s[0])}から${b.until}${b.untilTime}まで。分包機では作らず、持参の包をそのまま使います。</p>
+        ${b.slots.map(sl => { const have = b.drugs[0].pack?.counts?.[tname[sl.t]]; return `<div class="rc-sh"><b>${rcLabel(sl.t)}</b><span>${sl.cells.length}包使う</span>${have != null ? `<span class="${have < sl.cells.length ? 'rc-short' : 'muted'}">持参 ${have}包${have < sl.cells.length ? '（足りません）' : ''}</span>` : ''}</div>`; }).join('')}
+      </div>`;
+    return {
+      title: '分包のレシピ',
+      left: `<button class="btn ghost" data-act="rptPanel">戻る</button>`,
+      body: `
+        <div class="block ins">
+          <h3>条件</h3>
+          <div class="field"><label>病棟</label><div class="sizes">${RCP.wards.map((x, i) => `<button class="seg${i === RCP.ward ? ' on' : ''}" data-act="rcWard" data-v="${i}">${esc(x.name)}</button>`).join('')}<button class="seg" data-act="rcWardEdit">${RCP.editWard ? '閉じる' : '編集'}</button></div>
+            <p class="muted">定期日：${WEEKDAYS[w.weekday]}曜日・${endLabel[w.end]}</p>
+            ${RCP.editWard ? `<div class="prep">
+              <div class="field"><label for="rcWardName">病棟名</label><input id="rcWardName" value="${esc(w.name)}"></div>
+              <div class="field"><label>定期日</label><div class="sizes">${seg('rcWeekday', WEEKDAYS.map((x, i) => [i, x]), w.weekday)}</div></div>
+              <div class="field"><label>持参薬で作る終わり</label><div class="sizes">${seg('rcEndMode', Object.entries(endLabel), w.end)}</div></div>
+              <div class="inline"><button class="btn" data-act="rcWardAdd">＋ 病棟を追加</button>${RCP.wards.length > 1 ? '<button class="btn ghost danger" data-act="rcWardDel">この病棟を削除</button>' : ''}</div>
+            </div>` : ''}</div>
+          ${needStart ? `<div class="field"><label>用意済みの記載がない薬（${noPrep.map(d => circled(d.no)).join('')}）の開始</label>
+            <div class="prep-when"><input type="date" id="rcStartDate" value="${RCP.start[0]}"><span>の</span></div>
+            <div class="sizes">${seg('rcStartTime', RC_T.map((t, i) => [i, rcLabel(t)]), RCP.start[1])}<span class="muted" style="align-self:center">から</span></div></div>` : ''}
+          <div class="field"><label for="rcDis">退院日（決まっていれば・その日の朝まで作る）</label>
+            <div class="prep-when"><input type="date" id="rcDis" value="${RCP.discharge}">${RCP.discharge ? '<button class="btn ghost" data-act="rcDisClear">なし</button>' : ''}</div></div>
+          <div class="field"><label>別包にする薬（下剤）<small>自動で選んでいます・タップで切替</small></label>
+            <div class="chips">${doc.drugs.filter(d => cont.has(d.no) && !d.u?.prn && !d.ext && !d.u?.freq && !d.pack).map(d => {
+              const on = RCP.lax[d.no] ?? LAXATIVE.test(d.name || '');
+              return `<button class="chip${on ? ' on' : ''}" data-act="rcLax" data-n="${d.no}">${circled(d.no)} ${esc(rptShort(d))}</button>`;
+            }).join('')}</div></div>
+        </div>
+        ${R.batches.length ? R.batches.map(card).join('') : '<div class="block"><p class="muted">分包機で作る薬はありません。</p></div>'}
+        ${R.packs.map(packCard).join('')}
+        ${R.skipped.length || R.unknown.length ? `<div class="block">
+          ${R.unknown.length ? `<h3>確認が必要</h3>${R.unknown.map(x => `<p class="warnline">${circled(x.d.no)} ${esc(nm(x.d))}：${esc(x.why)}</p>`).join('')}<p class="muted">持参薬レポートの用法を「朝2錠・夕1錠」のように直して読み直すと計算できます。</p>` : ''}
+          ${R.skipped.length ? `<h3>分包機の対象外</h3>${R.skipped.map(x => `<p class="muted">${circled(x.d.no)} ${esc(nm(x.d))}：${esc(x.why)}</p>`).join('')}` : ''}
+        </div>` : ''}
+        ${RCP.msg ? `<p class="okline" role="status">${esc(RCP.msg)}</p>` : ''}`,
+      foot: `<button class="btn primary" data-act="rcApply" ${R.batches.length + R.packs.length ? '' : 'disabled'}>作った内容で指示の「用意済み」を更新</button>`
+    };
+  },
   rpt() {
     const doc = RPT.doc, cam = canScanGS1();
     const tag = (t, cls = '') => `<span class="tag${cls ? ' ' + cls : ''}">${esc(t)}</span>`;
@@ -4069,6 +4316,22 @@ const actions = {
   llmPanel: () => openPanel({ type: 'llm' }),
   rptPanel: () => { if (!RPT.doc && RPT.text.trim()) rptReparse(); openPanel({ type: 'rpt' }); },
   rptCam: () => camOpen('rpt'),
+  recipe: () => { RCP.msg = ''; openPanel({ type: 'recipe' }); },
+  rcWard: el => { RCP.ward = +el.dataset.v; rcpSave(); renderPanel(); },
+  rcWardEdit: () => { RCP.editWard = !RCP.editWard; renderPanel(); },
+  rcWeekday: el => { rcWard().weekday = +el.dataset.v; rcpSave(); renderPanel(); },
+  rcEndMode: el => { rcWard().end = el.dataset.v; rcpSave(); renderPanel(); },
+  rcWardAdd: () => { RCP.wards.push({ name: '病棟' + (RCP.wards.length + 1), weekday: 4, end: 'prev' }); RCP.ward = RCP.wards.length - 1; rcpSave(); renderPanel(); },
+  rcWardDel: () => { RCP.wards.splice(RCP.ward, 1); RCP.ward = 0; rcpSave(); renderPanel(); },
+  rcStartTime: el => { RCP.start = [RCP.start[0], +el.dataset.v]; rcpSave(); renderPanel(); },
+  rcDisClear: () => { RCP.discharge = ''; renderPanel(); },
+  rcLax: el => { const n = +el.dataset.n, d = RPT.doc.drugs.find(x => x.no === n); RCP.lax[n] = !(RCP.lax[n] ?? LAXATIVE.test(d?.name || '')); renderPanel(); },
+  rcApply: () => {
+    const n = rcApply();
+    rptApplyInstr();
+    RCP.msg = `指示の「用意済み」を更新しました（${n}件）。持参薬レポートの画面でコピーできます。`;
+    renderPanel();
+  },
   insNew: () => {
     const t = new Date();
     RPT.instr = { date: `${t.getMonth() + 1}/${t.getDate()}`, manage: '病棟管理', cont: [], contAll: false, acts: [], preps: [], extra: [] };
@@ -4278,6 +4541,10 @@ document.addEventListener('change', async e => {
     return;
   }
   if (e.target.id === 'llmOn') { const c = llmCfg(); c.on = e.target.checked; setLlmCfg(c); return; }
+  if (e.target.id === 'rcStartDate' && e.target.value) { RCP.start = [e.target.value, RCP.start[1]]; rcpSave(); renderPanel(); return; }
+  if (e.target.id === 'rcDis') { RCP.discharge = e.target.value; renderPanel(); return; }
+  if (e.target.id === 'rcWardName') { rcWard().name = e.target.value.trim() || '病棟'; rcpSave(); renderPanel(); return; }
+  if (e.target.classList?.contains('rcRemain')) { RCP.remain[e.target.dataset.k] = e.target.checked; return; }
   if (e.target.id === 'insDate' && RPT.instr) { RPT.instr.date = isoToMD(e.target.value); rptApplyInstr(); return; }
   if (e.target.classList?.contains('insPrepDate') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].until = isoToMD(e.target.value); rptApplyInstr(); return; }
   if (e.target.classList?.contains('insPrepRemain') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].remain = e.target.checked; rptApplyInstr(); return; }

@@ -1,6 +1,6 @@
 /* オフラインでも開けるように、アプリ一式を端末に保存する */
 const NDL_CACHE = 'ndl-v1';
-const CACHE = 'jishiyaku-dc87c6eb';
+const CACHE = 'jishiyaku-10b460d1';
 const FILES = ['./', './index.html', './tesseract.min.js', './worker.min.js', './tesseract-core-lstm.wasm.js', './jpn-traineddata-gz.wasm', './manifest.webmanifest', './icon.png', './zxing-reader.js', './zxing_reader.wasm'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
