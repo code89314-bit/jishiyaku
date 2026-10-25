@@ -276,6 +276,15 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .menu-list .btn { text-align: left; min-height: 52px; }
 
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
+.tag.note { background: var(--bg); color: var(--ink-2, #555); font-weight: 500; border: 1px solid var(--line); }
+.tag.pack { background: var(--pack); color: #fff; }
+.rp-row { display: grid; grid-template-columns: 2em minmax(0, 1fr); gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); }
+.rp-row:first-of-type { border-top: 0; }
+.rp-no { font-size: 20px; line-height: 1.2; font-weight: 700; color: var(--accent, #0e6a5a); }
+.rp-dose { font-weight: 500; color: var(--ink-2, #555); }
+.rp-pack { padding: 6px 0; }
+.rp-warn .warnline { margin: 4px 0; }
+.rp-row .tag { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
 .warnline { margin: 0; color: var(--warn); font-weight: 700; }
 .cands { display: grid; gap: 6px; }
@@ -1153,6 +1162,69 @@ function ocrImage(src) {
   return OCR.queue;
 }
 
+
+/* ---- 持参薬レポートの取り込み：画像 → 文字（端末内OCR、有効ならLLMで書き起こし）→ parseReport ---- */
+const RPT = { text: '', doc: null };
+try { RPT.text = localStorage.getItem('jishiyaku.rpt') || ''; } catch (e) {}
+const rptSave = () => { try { localStorage.setItem('jishiyaku.rpt', RPT.text); } catch (e) {} };
+const LLM_TRANSCRIBE = `画像に写っている「持参薬レポート」の文字を、そのまま書き写してください。
+規則：
+- 【持参薬】の見出しから、最後の「※」で始まる行まで。それ以外の画面の文字（メニュー、患者名、日付など）は書かない。
+- 文字を変えない・補わない・並べ替えない。丸数字（①②…㉑…）、●、・・・・・、（）、※ はそのまま。
+- 改行は画像の行どおり。空行は省いてよい。
+- 読めない文字は「?」にする。
+- 説明や前置きは書かず、本文だけを返す。`;
+async function llmTranscribe(src) {
+  const c = llmCfg(), url = await toJpegDataURL(src, 2400);
+  const r = await llmFetch('/v1/chat/completions', {
+    model: c.model, temperature: 0, max_tokens: 3000,
+    chat_template_kwargs: { enable_thinking: false }, experimental_speed_projection: false,
+    messages: [{ role: 'system', content: LLM_TRANSCRIBE },
+      { role: 'user', content: [{ type: 'text', text: 'この画像の持参薬レポートを書き写してください。' }, { type: 'image_url', image_url: { url } }] }]
+  });
+  return (r?.choices?.[0]?.message?.content || '').replace(/^```[a-z]*\n?|```$/gm, '').trim();
+}
+async function imageText(src) {
+  if (ocrEngine() === 'ndl') {
+    try {
+      const raw = await ndlRecognize(await ndlCanvas(src), (t, p) => ocrStatus(t, p));
+      let ls = raw.filter(l => l.box[2] - l.box[0] > l.box[3] - l.box[1]);
+      // 【持参薬】の見出しがあれば、それより左にある別の列（電子カルテのメニューなど）は捨てる
+      const head = ls.find(l => /持参/.test(l.text) && l.text.length <= 8);
+      if (head) { const hh = head.box[3] - head.box[1]; ls = ls.filter(l => l.box[2] > head.box[0] - hh); }
+      return ls.map(l => l.text).join('\n');
+    } catch (e) { console.error(e); ocrStatus('NDLOCR-Liteを使えなかったため、Tesseractで読み取ります', 0); }
+  }
+  const w = await getWorker();
+  const { data } = await w.recognize(await prepareImage(src), {}, { text: true });
+  return cleanOcrText(data.text || '');
+}
+function rptImage(src) {
+  OCR.pending++;
+  ocrStatus(`読み取り待ち（${OCR.pending}枚）`, 0);
+  const llmJob = llmReady() ? llmTranscribe(src).then(t => ({ t }), e => ({ err: e.message || String(e) })) : null;
+  OCR.queue = OCR.queue.then(async () => {
+    try {
+      let text = await imageText(src), note = '';
+      if (llmJob) {
+        ocrStatus('LLMサーバで書き起こし中…（30秒ほどかかります）', 0.9);
+        const r = await llmJob;
+        if (r.t && /[①-⑳●]|・{3,}/.test(r.t)) { text = r.t; note = '（LLMで書き起こし）'; }
+        else note = `（LLMは使えませんでした${r.err ? '：' + r.err : ''}。端末内のOCRで読み取りました）`;
+      }
+      RPT.text = (RPT.text.trim() ? RPT.text.replace(/\s*$/, '') + '\n' : '') + text;
+      RPT.doc = parseReport(RPT.text); rptSave();
+      OCR.pending--;
+      ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `読み取りました${note}。下の文字と結果を確認してください。`, 1);
+      if (ui.panel?.type === 'rpt') renderPanel();
+    } catch (err) {
+      OCR.pending--; console.error(err);
+      ocrStatus('読み取れませんでした（' + (err?.message || err) + '）', 0);
+    }
+  });
+  return OCR.queue;
+}
+
 /* ---- GS1バーコード（PTPのGS1データバー）を無音カメラで読む ----
    zxing-cpp（WASM）をページと一緒に置き、端末内で読み取る */
 const BC = { ready: null, timer: null, busy: false, onFound: null };
@@ -1223,7 +1295,7 @@ async function camOpen(mode = 'ocr') {
   $('#cam').classList.toggle('gs1', gs1);
   $('.cam .shutter').hidden = gs1;
   Cam.shots = 0; $('#camCount').textContent = gs1 ? 'GS1読み取り' : '撮影 0枚';
-  $('#camMsg').textContent = gs1 ? 'PTPシートのバーコードを枠の中に映してください' : '1ページずつ枠に合わせて撮影';
+  $('#camMsg').textContent = gs1 ? 'PTPシートのバーコードを枠の中に映してください' : mode === 'rpt' ? 'レポートの画面を枠に合わせて撮影（長いときは分けて撮影）' : '1ページずつ枠に合わせて撮影';
   $('#cam').hidden = false;
   if (gs1) return true;
   ocrStatus(OCR.status);
@@ -1246,7 +1318,7 @@ function camShot() {
   const f = $('#camFlash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
   try { navigator.vibrate?.(30); } catch (e) {}
   Cam.shots++; $('#camCount').textContent = `撮影 ${Cam.shots}枚`;
-  ocrImage(c);
+  if (Cam.mode === 'rpt') rptImage(c); else ocrImage(c);
   ocrStatus(OCR.status);
 }
 async function camTorch() {
@@ -2578,6 +2650,151 @@ function buildReport() {
   return out.join('\n');
 }
 
+
+/* ================= 持参薬レポートを読む（服用開始・一包化のレシピ用） =================
+   このアプリが作る形式（【持参薬】／●医療機関／①薬品名 量（残薬：3錠）／・・・・・分1 朝食後／※①②一包化（朝3包））を
+   OCRの誤りや手直しがあっても読めるように、行の種類ごとに解釈する。番号は丸数字が読めなくても順番から補う。 */
+function circledValue(ch) {
+  const c = ch.codePointAt(0);
+  if (c >= 0x2460 && c <= 0x2473) return c - 0x245F;          // ①〜⑳
+  if (c >= 0x3251 && c <= 0x325F) return c - 0x3250 + 20;     // ㉑〜㉟
+  if (c >= 0x32B1 && c <= 0x32BF) return c - 0x32B0 + 35;     // ㊱〜㊿
+  if (c >= 0x2776 && c <= 0x277F) return c - 0x2775;          // ❶〜❿
+  return 0;
+}
+// 行頭の番号：丸数字／(12)／12.／12)／[12] など。戻り値 [番号, 残り]
+function leadNumber(line) {
+  const ch = String.fromCodePoint(line.codePointAt(0) || 32);
+  const v = circledValue(ch);
+  if (v) return [v, line.slice(ch.length)];
+  const m = line.normalize('NFKC').match(/^\s*(?:[(\[【〔]\s*(\d{1,3})\s*[)\]】〕]|(\d{1,3})\s*[.)．、:：]|(\d{1,3})(?=\s*[ァ-ヴA-Za-z一-龥]))\s*/);
+  if (m) return [+(m[1] || m[2] || m[3]), line.normalize('NFKC').slice(m[0].length)];
+  return [0, line];
+}
+// 「①②④〜⑥」「1,2,4-6」→ [1,2,4,5,6]
+function parseNumberList(t) {
+  const out = [];
+  const toks = [];
+  for (const ch of t) {
+    const v = circledValue(ch);
+    if (v) toks.push(v);
+    else if (/[〜～~ー\-−–―]/.test(ch)) toks.push('-');
+    else if (/\d/.test(ch.normalize('NFKC'))) {
+      if (typeof toks[toks.length - 1] === 'string' && /^\d+$/.test(toks[toks.length - 1])) toks[toks.length - 1] += ch.normalize('NFKC');
+      else toks.push(ch.normalize('NFKC'));
+    } else toks.push(',');
+  }
+  const nums = toks.map(x => typeof x === 'string' && /^\d+$/.test(x) ? +x : x);
+  for (let i = 0; i < nums.length; i++) {
+    if (typeof nums[i] !== 'number') continue;
+    if (nums[i + 1] === '-' && typeof nums[i + 2] === 'number' && nums[i + 2] > nums[i]) {
+      for (let k = nums[i]; k <= nums[i + 2]; k++) out.push(k);
+      i += 2;
+    } else out.push(nums[i]);
+  }
+  return [...new Set(out)];
+}
+const RPT_TIMES = [['起床時', 'wake'], ['朝', 'morning'], ['昼', 'noon'], ['夕', 'evening'], ['眠前', 'bedtime'], ['就寝前', 'bedtime'], ['寝る前', 'bedtime']];
+function parseReport(text) {
+  const doc = { clinics: [], drugs: [], packs: [], warnings: [] };
+  let clinic = null, pending = [], last = null, seq = 0;
+  const fixedNo = [];
+  const ensureClinic = () => { if (!clinic) { clinic = { name: '医療機関不明', drugs: [] }; doc.clinics.push(clinic); } return clinic; };
+  const lines = String(text || '').replace(/\r/g, '').split('\n').map(l => l.replace(/[\s　]+$/, '')).filter(l => l.trim());
+  // 【持参薬】の見出しがあれば、そこから読む（画面の他の文字を拾わないように）
+  const hi = lines.findIndex(l => /^[【\[]?\s*持参.?\s*[】\]]?$/.test(normalize(l.trim())));
+  let afterPacks = false;
+  for (const raw of lines.slice(hi >= 0 ? hi + 1 : 0)) {
+    const line = raw.trim();
+    const nf = normalize(line);
+    if (/^[【\[]?\s*持参.?\s*[】\]]?$/.test(nf)) continue;
+    // 医療機関の行より前・一包化の注記より後は、番号の付いた行だけを薬とみなす
+    if ((!clinic || afterPacks) && !/^[●○◯•◉◎■□※*＊]/.test(line) && !/^米(?=[①-⑳\d(（])/.test(line) && !leadNumber(line)[0]) continue;
+    // 医療機関
+    if (/^[●○◯•◉◎■□]/.test(line)) {
+      if (pending.length) doc.warnings.push(`${clinic?.name || ''}：用法の行（・・・・・）がないまま次の医療機関になった薬があります（${pending.map(d => circled(d.no)).join('')}）`);
+      pending = [];
+      clinic = { name: nf.replace(/^[●○◯•◉◎■□]\s*/, '').trim() || '医療機関不明', drugs: [] };
+      doc.clinics.push(clinic); last = null; afterPacks = false; continue;
+    }
+    // 用法（・・・・・分1 朝食後）
+    let um = nf.match(/^[・･.。…‥\-ー─―_~〜〰]{2,}\s*(.*)$/);
+    // 点線が読めず用法だけが残った行（「分2朝夕食後」「疼痛時頓用」「週1回起床時」）も用法とみなす
+    if (!um && pending.length && !leadNumber(line)[0] && !/(錠|カプセル|mg|μg|%|散|顆粒|液|テープ|軟膏|クリーム|シロップ|配合)/.test(nf)
+        && /^[・･.。…‥\s]*(分\s*\d|1日\s*\d+\s*回|週\s*\d|隔日|.{0,8}時\s*(頓用|頓服)|頓用|頓服|毎食|朝|昼|夕|就寝|眠前|寝る前|起床|食前|食後|食間)/.test(nf))
+      um = [nf, nf.replace(/^[・･.。…‥\s]+/, '')];
+    if (um) {
+      const label = um[1].trim();
+      if (!pending.length) doc.warnings.push(`対応する薬のない用法の行があります：${label}`);
+      for (const d of pending) { d.usage = label; d.u = uFromStruct(structUsage(label)); }
+      pending = []; last = null; continue;
+    }
+    // 一包化の注記（※①②④〜⑥一包化（朝3包、夕3包））
+    if (((/^[※*＊]/.test(line) || /^米(?=[①-⑳\d(（])/.test(line)) && /包/.test(nf)) || (/一包化/.test(nf) && !/[錠カプセル]/.test(nf))) {
+      const body = line.replace(/^[※*＊]\s*/, '');
+      const i = body.search(/[一ー～〜\-]?包化/);
+      const nums = parseNumberList(i >= 0 ? body.slice(0, i) : body);
+      const counts = {};
+      const cpart = normalize(i >= 0 ? body.slice(i) : '');
+      for (const [l, k] of RPT_TIMES) { const m = cpart.match(new RegExp(l + '\\s*(\\d+)\\s*包')); if (m) counts[k] = +m[1]; }
+      doc.packs.push({ nums, counts, raw: line });
+      afterPacks = true;
+      if (!nums.length) doc.warnings.push(`一包化の注記から番号を読み取れません：${line}`);
+      continue;
+    }
+    // 薬の後ろの注記だけの行（配合剤の成分、採用なし・類似薬など）
+    if (/^[(（]/.test(line) && last) { last.notes.push(nf.replace(/^[(（]|[)）]$/g, '')); continue; }
+    // 薬の行（番号がない行は、薬らしい文字があるときだけ）
+    let [no, rest] = leadNumber(line);
+    if (!no && !/[ァ-ヴ]{2,}|錠|カプセル|散|顆粒|液|軟膏|\d\s*(mg|μg|g|%)/.test(nf)) continue;
+    const expected = seq + 1;
+    if (!no) { no = expected; fixedNo.push(`${circled(no)}（番号なし）`); }
+    else if (no !== expected) { fixedNo.push(`${circled(expected)}（「${no}」と読めた）`); no = expected; }   // 丸数字の読み違い（⑮以降はOCRが苦手）→ 順番を優先
+    seq = no;
+    let t = normalize(rest).trim();
+    const d = { no, name: '', dose: '', remain: null, remainText: '', none: false, ext: false, extOpen: 0, extFull: 0, notes: [], usage: '', u: null, clinic: ensureClinic().name };
+    // 末尾の（…）を外しながら読む
+    for (let guard = 0; guard < 6; guard++) {
+      const m = t.match(/[(（]([^()（）]*)[)）]\s*$/);
+      if (!m) break;
+      const p = m[1].trim();
+      t = t.slice(0, m.index).trim();
+      let mm;
+      if ((mm = p.match(/^残薬\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(\D*)$/))) { d.remain = { amt: +mm[1], unit: mm[2].trim() }; d.remainText = p; }
+      else if (/^持参なし/.test(p)) { d.none = true; d.remainText = p; }
+      else if (/^(使いかけ\s*\d|\d+(?:\.\d+)?\s*(本|個|枚|瓶|袋|筒|キット|箱)(?:[、,]|$))/.test(p)) {
+        d.ext = true; d.remainText = p;
+        for (const x of p.split(/[、,]/)) { const q = x.match(/(使いかけ)?\s*(\d+(?:\.\d+)?)/); if (q) q[1] ? d.extOpen += +q[2] : d.extFull += +q[2]; }
+      }
+      else d.notes.unshift(p);
+    }
+    // 閉じかっこが読めなかった注記（「…1錠(採用なし 類似薬:…」）
+    const open = t.match(/\s*[(（]\s*((?:院内|採用|残薬|持参|使いかけ|類似)[^()（）]*)$/);
+    if (open) { d.notes.unshift(open[1].trim() + '（読み取り不完全）'); t = t.slice(0, open.index).trim(); }
+    // 名前と量（このアプリの形式は「名前 1日量」）
+    const RPT_DOSE = '((?:1日)?\\d+(?:\\.\\d+)?\\s*(?:錠|カプセル|C|包|g|mL|ml|枚|本|個|瓶|袋|吸入|滴|噴霧|単位|キット|筒|管))$';
+    const dm = t.match(new RegExp('^(.*\\S)\\s+' + RPT_DOSE)) || t.match(new RegExp('^(.*[」)）])' + RPT_DOSE))
+      || t.match(/^(.*[A-Za-zμ%])((?:1日)?\d+(?:\.\d+)?(?:錠|カプセル|本|枚|包|袋|個|瓶|キット|吸入))$/);   // 「…AP1錠」「…100mg14枚」「…0.1%2本」   // 「…「トーワ」1錠」のように空白がなくても
+    if (dm) { d.name = dm[1].trim(); d.dose = dm[2].replace(/^1日/, '').replace(/\s/g, ''); } else d.name = t;
+    if (!d.name) { doc.warnings.push(`${circled(no)}：薬品名を読み取れません（${line}）`); }
+    ensureClinic().drugs.push(d); doc.drugs.push(d); pending.push(d); last = d;
+  }
+  if (pending.length) doc.warnings.push(`用法の行（・・・・・）がない薬があります：${pending.map(d => circled(d.no)).join('')}`);
+  if (fixedNo.length) doc.warnings.unshift(`番号を上から順に数え直しました（名前と番号を確認してください）：${fixedNo.join('、')}`);
+  // 一包化の番号の確認
+  const byNo = new Map(doc.drugs.map(d => [d.no, d]));
+  for (const p of doc.packs) {
+    const miss = p.nums.filter(n => !byNo.has(n));
+    if (miss.length) doc.warnings.push(`一包化の注記に、レポートにない番号があります：${miss.map(circled).join('')}`);
+    for (const n of p.nums) { const d = byNo.get(n); if (d) d.pack = p; }
+  }
+  for (const d of doc.drugs) {
+    if (!d.u) d.u = uFromStruct(structUsage(''));
+    if (!d.ext && d.u.ext) d.ext = true;
+  }
+  return doc;
+}
+
 /* ================= 一覧の描画 ================= */
 const toKata = s => s.replace(/[ぁ-ゖ]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60));
 function matches(d) {
@@ -3086,6 +3303,61 @@ const PANELS = {
     };
   },
 
+
+  rpt() {
+    const doc = RPT.doc, cam = canScanGS1();
+    const tag = (t, cls = '') => `<span class="tag${cls ? ' ' + cls : ''}">${esc(t)}</span>`;
+    const row = d => `<div class="rp-row">
+        <span class="rp-no">${circled(d.no)}</span>
+        <div class="info">
+          <div class="dname">${esc(d.name || '（名前なし）')}${d.dose ? ` <span class="rp-dose">${esc(d.dose)}</span>` : ''}</div>
+          <div class="sub">${esc(d.usage || '用法なし')}</div>
+          <div class="tags">${[
+            d.pack ? tag('一包化', 'pack') : '',
+            d.remain ? tag(`残薬 ${qty(d.remain.amt)}${d.remain.unit}`) : '',
+            d.none ? tag('持参なし', 'warn') : '',
+            d.ext && d.remainText ? tag(d.remainText) : '',
+            d.u?.prn ? tag('頓用') : '',
+            ...d.notes.map(n => tag(n, 'note'))].join('')}</div>
+        </div></div>`;
+    const tname = k => (TIMINGS.find(t => t[0] === k) || [, k])[1];
+    const result = !doc ? '' : !doc.drugs.length ? `<div class="block"><p class="warnline">薬の行が見つかりません。【持参薬】から始まるレポートの文字か確認してください。</p></div>` : `
+      <div class="block">
+        <h3>読み取り結果<small>${doc.clinics.length}医療機関・${doc.drugs.length}品目${doc.packs.length ? `・一包化${doc.packs.length}件` : ''}</small></h3>
+        ${doc.warnings.length ? `<div class="rp-warn">${doc.warnings.map(w => `<p class="warnline">${esc(w)}</p>`).join('')}</div>` : '<p class="okline">番号・用法・一包化の注記に食い違いはありません</p>'}
+      </div>
+      ${doc.clinics.map(c => `<div class="block"><h3>●${esc(c.name)}</h3>${c.drugs.map(row).join('')}</div>`).join('')}
+      ${doc.packs.length ? `<div class="block"><h3>一包化</h3>${doc.packs.map((p, i) => `<div class="rp-pack">
+          <div class="dname">${esc(p.nums.length ? numberRange(p.nums) : '番号不明')}</div>
+          <div class="sub">${Object.keys(p.counts).length ? Object.entries(p.counts).map(([k, v]) => `${tname(k)}${v}包`).join('、') : '包数の記載なし'}</div>
+        </div>`).join('')}</div>` : ''}`;
+    return {
+      title: '持参薬レポートを読む',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>レポートを取り込む<small>服用開始・一包化の準備に使います</small></h3>
+          <div class="ocr-btns">
+            ${cam ? `<button class="btn primary" data-act="rptCam">カメラで撮る（無音）</button>` : ''}
+            <label class="btn filebtn${cam ? '' : ' primary'}" for="rptFile">画像を選ぶ</label>
+            <input type="file" id="rptFile" accept="image/*" multiple hidden>
+          </div>
+          <div class="ocr-status" id="ocrStatus" ${OCR.status ? '' : 'hidden'}>
+            <div class="ocr-bar"><span id="ocrBar" style="width:${Math.round((OCR.progress || 0) * 100)}%"></span></div>
+            <p class="muted" id="ocrMsg">${esc(OCR.status || '')}</p>
+          </div>
+          <p class="muted">電子カルテなどに表示された持参薬レポートを撮影するか、スクリーンショットを選んでください。長いレポートは何枚かに分けて取り込めます（続けて追加されます）。文字をコピーできる場合は、下の枠に貼り付けるのが一番確実です。${llmReady() ? 'LLMサーバが有効なので、書き起こしにLLMも使います。' : ''}</p>
+        </div>
+        <textarea class="scanbox" id="rptText" placeholder="【持参薬】から始まるレポートの文字（読み取り結果・貼り付け）" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">${esc(RPT.text)}</textarea>
+        <div class="inline" style="margin:8px 0 14px">
+          <button class="btn primary" data-act="rptParse">読み直す</button>
+          <button class="btn" data-act="rptClear">消去</button>
+          <button class="btn ghost" data-act="rptFromCurrent">今の患者のレポートを入れる</button>
+        </div>
+        ${result}`
+    };
+  },
+
   ocr() {
     const e = ocrEngine(), p = ui.panel;
     const opt = (v, t, d) => `<button data-act="ocrSet" data-v="${v}" aria-pressed="${e === v}" style="display:block;width:100%;text-align:left;font:inherit;color:inherit;margin:0 0 8px;padding:12px 14px;border-radius:12px;cursor:pointer;${e === v ? 'border:2px solid #0e6a5a;background:#eef6f3' : 'border:1px solid #c9d2cf;background:#fff'}">
@@ -3178,6 +3450,7 @@ const PANELS = {
       left: `<button class="btn ghost" data-act="close">閉じる</button>`,
       body: `
         <div class="menu-list">
+          <button class="btn primary" data-act="rptPanel">持参薬レポートを読む（服用開始・一包化）</button>
           <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
           <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
           ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="ocrPanel">端末内の読み取り（${ocrEngine() === 'ndl' ? 'NDLOCR-Lite' : 'Tesseract'}）</button>` : ''}
@@ -3632,6 +3905,11 @@ const actions = {
   // マスター
   masterPanel: () => openPanel({ type: 'master' }),
   llmPanel: () => openPanel({ type: 'llm' }),
+  rptPanel: () => { if (!RPT.doc && RPT.text.trim()) RPT.doc = parseReport(RPT.text); openPanel({ type: 'rpt' }); },
+  rptCam: () => camOpen('rpt'),
+  rptParse: () => { const t = $('#rptText'); if (t) RPT.text = t.value; RPT.doc = parseReport(RPT.text); rptSave(); renderPanel(); },
+  rptClear: () => { RPT.text = ''; RPT.doc = null; rptSave(); ocrStatus(''); renderPanel(); },
+  rptFromCurrent: () => { RPT.text = buildReport(); RPT.doc = parseReport(RPT.text); rptSave(); renderPanel(); },
   ocrPanel: () => { openPanel({ type: 'ocr' }); ndlCached().then(v => { if (ui.panel?.type === 'ocr') { ui.panel.cached = v; renderPanel(); } }); },
   ocrSet: el => { try { localStorage.setItem('jishiyaku.ocr', el.dataset.v); } catch (e) {} renderPanel(); },
   ocrDownload: async () => {
@@ -3737,6 +4015,7 @@ document.addEventListener('input', e => {
   const t = e.target;
   if (t.id === 'search') { ui.search = t.value; renderMain(); return; }
   if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
+  if (t.id === 'rptText') { RPT.text = t.value; rptSave(); return; }
   if (t.id === 'reportText') { ui.panel.text = t.value; return; }
   if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
   if (t.dataset.amt && ui.panel?.type === 'heat') {
@@ -3802,6 +4081,12 @@ document.addEventListener('change', async e => {
     return;
   }
   if (e.target.id === 'llmOn') { const c = llmCfg(); c.on = e.target.checked; setLlmCfg(c); return; }
+  if (e.target.id === 'rptFile' && e.target.files.length) {
+    const files = [...e.target.files];
+    e.target.value = '';
+    for (const f of files) rptImage(f);
+    return;
+  }
   if (e.target.id === 'ocrFile' && e.target.files.length) {
     const files = [...e.target.files];
     e.target.value = '';
