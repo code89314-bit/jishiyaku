@@ -285,6 +285,16 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .rp-pack { padding: 6px 0; }
 .rp-warn .warnline { margin: 4px 0; }
 .rp-row .tag { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: inherit; font-size: 13.5px; padding: 7px 10px; border-radius: 99px; border: 1px solid var(--line); background: #fff; color: inherit; cursor: pointer; min-height: 36px; }
+.chip small { margin-left: 4px; font-size: 10.5px; opacity: .75; }
+.chip.on { background: #0e6a5a; border-color: #0e6a5a; color: #fff; }
+.ins .field > label small { margin-left: 6px; font-weight: 400; color: var(--ink-2, #666); }
+.prep { border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin: 0 0 10px; background: var(--bg); }
+.prep-when { display: flex; align-items: center; gap: 8px; margin: 8px 0; white-space: nowrap; }
+.prep-when input { height: 40px; font: inherit; font-size: 16px; }
+.ins input[type=date] { font: inherit; font-size: 16px; height: 40px; }
+.ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
 .warnline { margin: 0; color: var(--warn); font-weight: 700; }
 .cands { display: grid; gap: 6px; }
@@ -1167,6 +1177,19 @@ function ocrImage(src) {
 const RPT = { text: '', doc: null };
 try { RPT.text = localStorage.getItem('jishiyaku.rpt') || ''; } catch (e) {}
 const rptSave = () => { try { localStorage.setItem('jishiyaku.rpt', RPT.text); } catch (e) {} };
+RPT.instr = null;
+// レポート本文を読み直し、指示も取り出す
+function rptReparse() { RPT.doc = parseReport(RPT.text); RPT.instr = RPT.doc.instr; rptSave(); }
+// フォームで直した指示を、本文の区切りより下に書き戻す
+function rptApplyInstr() {
+  const ls = RPT.text.replace(/\r/g, '').split('\n');
+  let si = ls.findIndex(l => INSTR_SEP.test(l));
+  if (si < 0) si = ls.findIndex(l => INSTR_HEAD.test(normalize(l.trim())));
+  const top = (si >= 0 ? ls.slice(0, si) : ls).join('\n').replace(/\s*$/, '');
+  RPT.text = top + '\n\n' + instrText(RPT.instr);
+  rptReparse();
+  renderPanel();
+}
 const LLM_TRANSCRIBE = `画像に写っている「持参薬レポート」の文字を、そのまま書き写してください。
 規則：
 - 【持参薬】の見出しから、最後の「※」で始まる行まで。それ以外の画面の文字（メニュー、患者名、日付など）は書かない。
@@ -1213,7 +1236,7 @@ function rptImage(src) {
         else note = `（LLMは使えませんでした${r.err ? '：' + r.err : ''}。端末内のOCRで読み取りました）`;
       }
       RPT.text = (RPT.text.trim() ? RPT.text.replace(/\s*$/, '') + '\n' : '') + text;
-      RPT.doc = parseReport(RPT.text); rptSave();
+      rptReparse();
       OCR.pending--;
       ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `読み取りました${note}。下の文字と結果を確認してください。`, 1);
       if (ui.panel?.type === 'rpt') renderPanel();
@@ -2588,13 +2611,13 @@ function circled(n) {
   return `(${n})`;
 }
 // [1,2,4,5,6] → ①②④〜⑥（3つ以上の連番は「〜」でまとめる）
-function numberRange(nums) {
+function numberRange(nums, minRun = 3) {
   const s = [...new Set(nums)].sort((a, b) => a - b);
   let out = '';
   for (let i = 0; i < s.length;) {
     let j = i;
     while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
-    if (j - i >= 2) out += circled(s[i]) + '〜' + circled(s[j]);
+    if (j - i >= minRun - 1) out += circled(s[i]) + '〜' + circled(s[j]);
     else for (let k = i; k <= j; k++) out += circled(s[k]);
     i = j + 1;
   }
@@ -2695,12 +2718,95 @@ function parseNumberList(t) {
   return [...new Set(out)];
 }
 const RPT_TIMES = [['起床時', 'wake'], ['朝', 'morning'], ['昼', 'noon'], ['夕', 'evening'], ['眠前', 'bedtime'], ['就寝前', 'bedtime'], ['寝る前', 'bedtime']];
+
+/* ---- 指示（区切り「＊＊＊＊」より下）----
+   【10/23指示】
+   病棟管理　①②③継続
+   ※①②:10/25朝まで
+   ※③:10/30まで（残薬あり）   ←「まで」＝その日（時点）まで薬剤師が用意済み。（残薬あり）＝さらに7日分作れる持参薬が残っている */
+const INSTR_SEP = { test(l) {
+  // 「＊＊＊＊＊＊」。OCRで「19888888888888」「米米米米」などに化けても、同じ記号がほとんどを占める行は区切りとみなす
+  const t = String(l || '').replace(/\s/g, '');
+  if (/^[*＊✱✳✲米★☆※]{5,}$/.test(t)) return true;
+  if (t.length < 6 || /[ぁ-んァ-ヴ一-龥]{2,}/.test(t.replace(/米/g, ''))) return false;
+  const cnt = {}; for (const ch of t) cnt[ch] = (cnt[ch] || 0) + 1;
+  const [top, n] = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
+  return n / t.length >= 0.75 && !/[・･.。…‥\-ー─―_~〜]/.test(top);   // 点線（用法の行の名残り）は区切りではない
+} };
+const INSTR_HEAD = /^[【\[(]?\s*\d{1,2}\s*[\/月]\s*\d{1,2}\s*日?\s*の?指示/;
+const INSTR_TIMES = ['起床時', '朝', '昼', '夕', '眠前'];
+const INSTR_VERBS = ['継続', '中止', '開始', '変更', '休薬', '再開'];
+function parseInstr(lines) {
+  const ins = { date: '', manage: '', cont: [], contAll: false, acts: [], preps: [], extra: [] };
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const nf = normalize(line);
+    let m;
+    if (!ins.date && (m = nf.match(/^[【\[(]?\s*(\d{1,2})\s*[\/月]\s*(\d{1,2})\s*日?\s*の?指示\s*[】\])]?/))) {
+      ins.date = `${+m[1]}/${+m[2]}`;
+      const rest = nf.slice(m[0].length).trim();
+      if (!rest) continue;
+    }
+    // 用意済み：※①②:10/25朝まで（残薬あり）
+    if ((m = line.match(/^[※*＊米]?\s*([^:：]+?)\s*[:：]\s*(.+)$/))) {
+      const nums = parseNumberList(m[1]), r = normalize(m[2]);
+      const dm = r.match(/(\d{1,2})\s*[\/月]\s*(\d{1,2})\s*日?\s*(起床時?|朝|昼|夕|眠前|就寝前|寝る前)?\s*(?:分)?\s*まで/);
+      if (nums.length && dm) {
+        const t = dm[3] ? (/寝|眠/.test(dm[3]) ? '眠前' : /起床/.test(dm[3]) ? '起床時' : dm[3]) : '';
+        ins.preps.push({ nums, until: `${+dm[1]}/${+dm[2]}`, time: t, remain: /残薬\s*(あり|有)/.test(r) });
+        continue;
+      }
+    }
+    // 管理と継続・中止など：病棟管理　①②③継続　④中止
+    if (/病棟管理|自己管理/.test(nf) || INSTR_VERBS.some(v => nf.includes(v))) {
+      if (/病棟管理/.test(nf)) ins.manage = '病棟管理'; else if (/自己管理/.test(nf)) ins.manage = '自己管理';
+      const body = line.replace(/病棟管理|自己管理/g, ' ');
+      let used = false;
+      for (const mm of body.matchAll(new RegExp('([^\\s、,　]*?)\\s*(' + INSTR_VERBS.join('|') + ')', 'g'))) {
+        if (/^(全て|すべて|全部|全薬)$/.test(mm[1])) { if (mm[2] === '継続') { ins.contAll = true; used = true; } continue; }
+        const nums = parseNumberList(mm[1]);
+        if (!nums.length) continue;
+        used = true;
+        if (mm[2] === '継続') ins.cont.push(...nums); else ins.acts.push({ nums, verb: mm[2] });
+      }
+      if (used || /^(病棟管理|自己管理)$/.test(nf.trim())) continue;
+    }
+    ins.extra.push(line);
+  }
+  ins.cont = [...new Set(ins.cont)].sort((a, b) => a - b);
+  return ins;
+}
+const instrNums = nums => numberRange(nums, 4);
+function instrText(ins) {
+  const head = [ins.manage, ins.contAll ? '全て継続' : ins.cont.length ? instrNums(ins.cont) + '継続' : '', ...ins.acts.map(a => instrNums(a.nums) + a.verb)].filter(Boolean).join('　');
+  return ['＊＊＊＊＊＊＊＊＊＊＊＊', `【${ins.date || '?/?'}指示】`, head, '',
+    ...ins.preps.map(p => `※${instrNums(p.nums)}:${p.until || '?/?'}${p.time}まで${p.remain ? '（残薬あり）' : ''}`),
+    ...ins.extra].join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+// 「10/25」⇔ 日付入力欄（年は今日に近い年とみなす）
+function mdToISO(md) {
+  const m = String(md || '').match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!m) return '';
+  const now = new Date();
+  let y = now.getFullYear();
+  const d = new Date(y, +m[1] - 1, +m[2]);
+  if (d - now > 183 * 864e5) y--; else if (now - d > 183 * 864e5) y++;
+  return `${y}-${String(+m[1]).padStart(2, '0')}-${String(+m[2]).padStart(2, '0')}`;
+}
+const isoToMD = iso => { const m = String(iso || '').match(/^\d{4}-(\d{2})-(\d{2})$/); return m ? `${+m[1]}/${+m[2]}` : ''; };
+
 function parseReport(text) {
   const doc = { clinics: [], drugs: [], packs: [], warnings: [] };
   let clinic = null, pending = [], last = null, seq = 0;
   const fixedNo = [];
   const ensureClinic = () => { if (!clinic) { clinic = { name: '医療機関不明', drugs: [] }; doc.clinics.push(clinic); } return clinic; };
-  const lines = String(text || '').replace(/\r/g, '').split('\n').map(l => l.replace(/[\s　]+$/, '')).filter(l => l.trim());
+  let lines = String(text || '').replace(/\r/g, '').split('\n').map(l => l.replace(/[\s　]+$/, '')).filter(l => l.trim());
+  // ＊＊＊＊（区切り）より下は指示
+  let si = lines.findIndex(l => INSTR_SEP.test(l)), skip = 1;
+  if (si < 0) { si = lines.findIndex(l => INSTR_HEAD.test(normalize(l.trim()))); skip = 0; }   // 区切りが読めなくても【10/23指示】から下は指示
+  doc.instr = si >= 0 ? parseInstr(lines.slice(si + skip)) : null;
+  if (si >= 0) lines = lines.slice(0, si);
   // 【持参薬】の見出しがあれば、そこから読む（画面の他の文字を拾わないように）
   const hi = lines.findIndex(l => /^[【\[]?\s*持参.?\s*[】\]]?$/.test(normalize(l.trim())));
   let afterPacks = false;
@@ -2929,6 +3035,61 @@ function renderPanel(resetScroll) {
   $('#pfootInner').innerHTML = r.foot || '';
   $('#pfoot').hidden = !r.foot;
   body.scrollTop = keep;
+}
+
+
+// 指示の入力フォーム（番号は薬品名つきのボタンで選ぶ。丸数字を読まなくてよい）
+function instrForm(doc) {
+  const ins = RPT.instr;
+  if (!ins) return `<div class="block"><h3>指示<small>区切り（＊＊＊）より下</small></h3>
+      <p class="muted">レポートに指示（＊＊＊＊の区切りより下）がありません。</p>
+      <button class="btn primary" data-act="insNew">指示を入力する</button></div>`;
+  const byNo = new Map(doc.drugs.map(d => [d.no, d]));
+  // 短い名前：先頭のカタカナ等（9文字まで）＋最初の規格（例：メトホルミン 250mg）
+  const nm = d => {
+    const n = (d.name || '').replace(/「[^」]*」/g, '').replace(/\s+/g, '');
+    const head = (n.match(/^[ァ-ヴー・A-Za-zＡ-Ｚ]{2,}/) || [n.slice(0, 6)])[0].slice(0, 9);
+    const st = (n.match(/\d+(?:\.\d+)?(?:mg|μg|g|%)/) || [''])[0];
+    return head + (st ? ' ' + st : '');
+  };
+  const chip = (act, d, on, extra = '') => `<button class="chip${on ? ' on' : ''}" data-act="${act}" data-n="${d.no}"${extra}>${circled(d.no)} ${esc(nm(d))}${d.u?.prn ? '<small>頓用</small>' : d.ext ? '<small>外用</small>' : ''}</button>`;
+  const contSet = new Set(ins.contAll ? doc.drugs.map(d => d.no) : ins.cont);
+  const stray = [...contSet].filter(n => !byNo.has(n));
+  const covered = new Set(ins.preps.flatMap(p => p.nums));
+  const notPrep = doc.drugs.filter(d => contSet.has(d.no) && !covered.has(d.no) && !d.u?.prn && !d.ext);
+  const seg = (act, list, cur, extra = '') => list.map(([v, l]) => `<button class="seg${cur === v ? ' on' : ''}" data-act="${act}" data-v="${v}"${extra}>${l}</button>`).join('');
+  return `<div class="block ins">
+      <h3>指示<small>区切り（＊＊＊）より下・ボタンで修正できます</small></h3>
+      <div class="field"><label for="insDate">指示日</label><input type="date" id="insDate" value="${mdToISO(ins.date)}"></div>
+      <div class="field"><label>管理</label><div class="sizes">${seg('insManage', [['病棟管理', '病棟管理'], ['自己管理', '自己管理']], ins.manage)}</div></div>
+      <div class="field"><label>継続する薬<small>${contSet.size}品目</small></label>
+        <div class="chips">${doc.drugs.map(d => chip('insCont', d, contSet.has(d.no))).join('')}</div>
+        <div class="inline" style="margin-top:6px"><button class="btn ghost" data-act="insContAll">すべて</button><button class="btn ghost" data-act="insContReg">定時の内服だけ</button><button class="btn ghost" data-act="insContNone">クリア</button></div>
+        ${stray.length ? `<p class="warnline">レポートにない番号が指示にあります：${stray.map(circled).join('')}（読み違いなら上のボタンで選び直してください）</p>` : ''}
+        ${ins.acts.length ? `<p class="muted">ほかの指示：${ins.acts.map(a => esc(instrNums(a.nums) + a.verb)).join('　')}</p>` : ''}
+      </div>
+      <div class="field"><label>用意済み<small>「〇月〇日（時点）まで」薬剤師が用意した分</small></label>
+        ${ins.preps.map((p, i) => {
+          const at = ` data-i="${i}"`;
+          const bad = p.nums.filter(n => !byNo.has(n));
+          return `<div class="prep">
+            <div class="chips">${doc.drugs.filter(d => contSet.has(d.no) || p.nums.includes(d.no)).map(d => chip('insPrepNum', d, p.nums.includes(d.no), at)).join('')}</div>
+            ${bad.length ? `<p class="warnline">レポートにない番号：${bad.map(circled).join('')}</p>` : ''}
+            <div class="prep-when"><input type="date" class="insPrepDate"${at} value="${mdToISO(p.until)}"><span>まで</span></div>
+            <div class="sizes">${seg('insPrepTime', [['', '終日'], ...INSTR_TIMES.map(t => [t, t])], p.time, at)}</div>
+            <div class="inline" style="justify-content:space-between;margin-top:6px">
+              <label class="pick" style="border:0;padding:0"><input type="checkbox" class="insPrepRemain"${at} ${p.remain ? 'checked' : ''} style="width:22px;height:22px"> <span>残薬あり（さらに7日分作れる）</span></label>
+              <button class="btn ghost danger" data-act="insPrepDel"${at}>削除</button>
+            </div>
+          </div>`;
+        }).join('')}
+        <button class="btn" data-act="insPrepAdd">＋ 用意済みの行を追加${notPrep.length ? `（${notPrep.map(d => circled(d.no)).join('')}）` : ''}</button>
+        ${notPrep.length ? `<p class="muted">継続する定時薬のうち、用意済みの記載がないもの：${notPrep.map(d => circled(d.no)).join('')}</p>` : ''}
+      </div>
+      <div class="field"><label for="insExtra">そのほかの指示（自由記載）</label><textarea id="insExtra" rows="2" style="width:100%;box-sizing:border-box">${esc(ins.extra.join('\n'))}</textarea></div>
+      <div class="field"><label>指示の文（電子カルテに貼る用）</label><pre class="ins-out" id="insOut">${esc(instrText(ins))}</pre>
+        <button class="btn primary" data-act="insCopy">コピー</button> <span class="muted" id="insCopyMsg"></span></div>
+    </div>`;
 }
 
 const PANELS = {
@@ -3354,7 +3515,8 @@ const PANELS = {
           <button class="btn" data-act="rptClear">消去</button>
           <button class="btn ghost" data-act="rptFromCurrent">今の患者のレポートを入れる</button>
         </div>
-        ${result}`
+        ${result}
+        ${doc && doc.drugs.length ? instrForm(doc) : ''}`
     };
   },
 
@@ -3905,11 +4067,46 @@ const actions = {
   // マスター
   masterPanel: () => openPanel({ type: 'master' }),
   llmPanel: () => openPanel({ type: 'llm' }),
-  rptPanel: () => { if (!RPT.doc && RPT.text.trim()) RPT.doc = parseReport(RPT.text); openPanel({ type: 'rpt' }); },
+  rptPanel: () => { if (!RPT.doc && RPT.text.trim()) rptReparse(); openPanel({ type: 'rpt' }); },
   rptCam: () => camOpen('rpt'),
-  rptParse: () => { const t = $('#rptText'); if (t) RPT.text = t.value; RPT.doc = parseReport(RPT.text); rptSave(); renderPanel(); },
-  rptClear: () => { RPT.text = ''; RPT.doc = null; rptSave(); ocrStatus(''); renderPanel(); },
-  rptFromCurrent: () => { RPT.text = buildReport(); RPT.doc = parseReport(RPT.text); rptSave(); renderPanel(); },
+  insNew: () => {
+    const t = new Date();
+    RPT.instr = { date: `${t.getMonth() + 1}/${t.getDate()}`, manage: '病棟管理', cont: [], contAll: false, acts: [], preps: [], extra: [] };
+    rptApplyInstr();
+  },
+  insManage: el => { RPT.instr.manage = el.dataset.v; rptApplyInstr(); },
+  insCont: el => {
+    const ins = RPT.instr, n = +el.dataset.n;
+    if (ins.contAll) { ins.cont = RPT.doc.drugs.map(d => d.no); ins.contAll = false; }
+    ins.cont = ins.cont.includes(n) ? ins.cont.filter(x => x !== n) : [...ins.cont, n].sort((a, b) => a - b);
+    rptApplyInstr();
+  },
+  insContAll: () => { RPT.instr.contAll = false; RPT.instr.cont = RPT.doc.drugs.map(d => d.no); rptApplyInstr(); },
+  insContReg: () => { RPT.instr.contAll = false; RPT.instr.cont = RPT.doc.drugs.filter(d => !d.u?.prn && !d.ext).map(d => d.no); rptApplyInstr(); },
+  insContNone: () => { RPT.instr.contAll = false; RPT.instr.cont = []; rptApplyInstr(); },
+  insPrepAdd: () => {
+    const ins = RPT.instr, doc = RPT.doc;
+    const cont = new Set(ins.contAll ? doc.drugs.map(d => d.no) : ins.cont), covered = new Set(ins.preps.flatMap(p => p.nums));
+    const nums = doc.drugs.filter(d => cont.has(d.no) && !covered.has(d.no) && !d.u?.prn && !d.ext).map(d => d.no);
+    const last = ins.preps[ins.preps.length - 1];
+    ins.preps.push({ nums, until: last?.until || ins.date || '', time: last?.time ?? '朝', remain: false });
+    rptApplyInstr();
+  },
+  insPrepDel: el => { RPT.instr.preps.splice(+el.dataset.i, 1); rptApplyInstr(); },
+  insPrepNum: el => {
+    const p = RPT.instr.preps[+el.dataset.i], n = +el.dataset.n;
+    p.nums = p.nums.includes(n) ? p.nums.filter(x => x !== n) : [...p.nums, n].sort((a, b) => a - b);
+    rptApplyInstr();
+  },
+  insPrepTime: el => { RPT.instr.preps[+el.dataset.i].time = el.dataset.v; rptApplyInstr(); },
+  insCopy: async () => {
+    const t = instrText(RPT.instr), m = $('#insCopyMsg');
+    try { await navigator.clipboard.writeText(t); if (m) m.textContent = 'コピーしました'; }
+    catch (e) { if (m) m.textContent = 'コピーできませんでした。上の文を長押しして選択してください'; }
+  },
+  rptParse: () => { const t = $('#rptText'); if (t) RPT.text = t.value; rptReparse(); renderPanel(); },
+  rptClear: () => { RPT.text = ''; RPT.doc = null; RPT.instr = null; rptSave(); ocrStatus(''); renderPanel(); },
+  rptFromCurrent: () => { RPT.text = buildReport(); rptReparse(); renderPanel(); },
   ocrPanel: () => { openPanel({ type: 'ocr' }); ndlCached().then(v => { if (ui.panel?.type === 'ocr') { ui.panel.cached = v; renderPanel(); } }); },
   ocrSet: el => { try { localStorage.setItem('jishiyaku.ocr', el.dataset.v); } catch (e) {} renderPanel(); },
   ocrDownload: async () => {
@@ -4081,6 +4278,10 @@ document.addEventListener('change', async e => {
     return;
   }
   if (e.target.id === 'llmOn') { const c = llmCfg(); c.on = e.target.checked; setLlmCfg(c); return; }
+  if (e.target.id === 'insDate' && RPT.instr) { RPT.instr.date = isoToMD(e.target.value); rptApplyInstr(); return; }
+  if (e.target.classList?.contains('insPrepDate') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].until = isoToMD(e.target.value); rptApplyInstr(); return; }
+  if (e.target.classList?.contains('insPrepRemain') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].remain = e.target.checked; rptApplyInstr(); return; }
+  if (e.target.id === 'insExtra' && RPT.instr) { RPT.instr.extra = e.target.value.split('\n').map(x => x.trim()).filter(Boolean); rptApplyInstr(); return; }
   if (e.target.id === 'rptFile' && e.target.files.length) {
     const files = [...e.target.files];
     e.target.value = '';
