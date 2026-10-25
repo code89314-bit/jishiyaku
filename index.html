@@ -717,8 +717,8 @@ const LLM_SYSTEM = `あなたは病院薬剤部で持参薬鑑別を補助して
 - name は印字どおりの薬品名（規格・メーカー名の「」も含める）。行頭の番号や記号（[1]、◇、(内)、(外) など）は除く。
 - 「一般名」「【般】」で書かれた処方箋記載名は generic に入れる（name には入れない）。
 - 用法は、次の項目に分けて入れる。同じ用法が複数の薬にまとめて書かれている場合は、それぞれの薬に同じ内容を入れる。
-  - dailyDose：1日量（例：3錠、1.02g、7枚、60mL）。お薬手帳で薬品名の右に書かれた量は、ふつう1日量。外用薬は全体の量（例：50g、1本）。
-  - perDose：1回量。「1回◯錠」「1回2吸入」などと書かれているときだけ入れる。
+  - dailyDose：1日量。「1回」が付いていない量（例：「1錠」「3錠」「1.02g」「7枚」「60mL」）は1日量として入れる。外用薬は全体の量（例：50g、1本）。
+  - perDose：1回量。「1回1錠」「1回2吸入」「1回0.5g」のように「1回」が付いた量だけを入れる（「1回」の文字は除く）。この場合、1日量が別に書かれていなければ dailyDose は空にする（計算しない）。
   - perDay：1日の回数（数字）。「1日3回」「分3」なら 3。書かれていなければ、時点の数（毎食後なら3）。頓用や回数の決まりがない場合は 0。
   - times：服用する時点を ["起床時","朝","昼","夕","就寝前"] から選んだ配列。「毎食後」は ["朝","昼","夕"]、「寝る前」「眠前」は "就寝前"。
   - meal：食事との関係。"食前"・"食直前"・"食後"・"食直後"・"食間" のいずれか。書かれていなければ ""。
@@ -1296,6 +1296,56 @@ function evalU(u, dose) {
   const label = empty ? '用法未記載' : usageLabel(su);
   const sortKey = [su.kind === 'prn' ? 2 : empty ? 1 : 0, su.perDay || 9, su.meal in MEAL_RANK ? MEAL_RANK[su.meal] : 5, n ? T_ORDER.indexOf(su.times[0]) : 9];
   return { label, sortKey, flags, kind: su.kind, empty };
+}
+
+/* ---- 量の単位：マスターの規格単位 → YJコード（投与経路＋剤形の英字）→ 名前 の順で決める ---- */
+const UNIT_TAIL = /(錠|カプセル|包|g|mL|枚|本|個|瓶|管|キット|袋|筒|シリンジ|噴霧|吸入|滴)\s*$/;
+let UNIT_TABLE = null;
+const routeOf = yj => { const n = +yj.slice(4, 7); return n < 400 ? '内' : n < 700 ? '注' : '外'; };
+function unitTable() {
+  if (UNIT_TABLE && UNIT_TABLE.size) return UNIT_TABLE;
+  const cnt = new Map();
+  for (const it of Master.items) {
+    if (!it.y || !it.s) continue;
+    const m = it.s.normalize('NFKC').match(UNIT_TAIL); if (!m) continue;
+    const k = routeOf(it.y) + it.y[7], c = cnt.get(k) || {};
+    c[m[1]] = (c[m[1]] || 0) + 1; cnt.set(k, c);
+  }
+  UNIT_TABLE = new Map([...cnt].map(([k, c]) => [k, Object.entries(c).sort((a, b) => b[1] - a[1])[0][0]]));
+  return UNIT_TABLE;
+}
+function doseUnit(d) {
+  const it = d.yj && masterByYJ(d.yj);
+  const m = (it?.s || '').normalize('NFKC').match(UNIT_TAIL);
+  if (m) return m[1];
+  if (d.yj && Master.ready) { const u = unitTable().get(routeOf(d.yj) + d.yj[7]); if (u) return u; }
+  const u = unit(d);
+  return u === 'C' ? 'カプセル' : u;
+}
+// 1回量の単位：吸入薬は「吸入」、点眼は「滴」、点鼻は「噴霧」、ほかは1日量と同じ
+function perDoseUnit(d) {
+  const n = (d.name || '').normalize('NFKC');
+  if (/吸入|タービュヘイラー|エアゾール|ディスカス|エリプタ|ブリーズヘラー|レスピマット|インヘラー/.test(n)) return '吸入';
+  if (/点眼/.test(n)) return '滴';
+  if (/点鼻/.test(n)) return '噴霧';
+  return doseUnit(d);
+}
+// 数字だけ入れたら単位を付ける
+const withUnit = (v, d, unitFn = doseUnit) => { v = (v || '').normalize('NFKC').trim(); return /^\d+(?:\.\d+)?$/.test(v) ? v + unitFn(d) : v; };
+const numPart = (v, d, unitFn = doseUnit) => { const u = unitFn(d), t = (v || '').normalize('NFKC').trim(); return t.endsWith(u) && /^\d+(?:\.\d+)?$/.test(t.slice(0, -u.length)) ? t.slice(0, -u.length) : t; };
+// 「1回1錠」は1回量、「1錠」は1日量。1日量がなく1回量×回数がわかれば計算して印を付ける
+function normalizeDoses(d) {
+  let dose = (d.dose || '').normalize('NFKC').replace(/\s/g, ''), m;
+  if ((m = dose.match(/^1回(.+)$/))) { d.dose = ''; d.u = { ...getU(d), perDose: m[1] }; }
+  else if ((m = dose.match(/^1日(.+)$/))) d.dose = m[1];
+  const U = getU(d);
+  if (U.perDose) { const pd = U.perDose.normalize('NFKC').replace(/^1回/, ''); if (pd !== U.perDose) d.u = { ...U, perDose: pd }; }
+  const U2 = getU(d);
+  if (!d.dose && U2.perDose && U2.perDay && !U2.prn && !U2.unequal) {
+    const a = withUnit(U2.perDose, d, perDoseUnit).match(/^(\d+(?:\.\d+)?)(\D*)$/);
+    if (a && a[2] === doseUnit(d)) { d.dose = String(Math.round(+a[1] * U2.perDay * 1000) / 1000) + a[2]; d.doseCalc = true; }
+  }
+  if (d.dose) d.dose = withUnit(d.dose, d);
 }
 
 // 処方箋記載名の行（【般】〜／同成分・同規格の別名）か
@@ -2827,8 +2877,10 @@ function usageForm(d) {
     <p class="okline" id="uLabel">レポート：・・・・・${esc(d.usageLabel || e.label)}</p>
     <div id="uFlags">${e.flags.map(f => `<p class="warnline">⚠ ${esc(f)}</p>`).join('')}</div>
     <div class="rv-pair" style="grid-template-columns:1fr 1fr;gap:10px">
-      <div class="field"><label for="u-dose">1日量</label><input id="u-dose" data-f="dose" value="${esc(d.dose)}" placeholder="例: 3錠" autocomplete="off"></div>
-      ${fld('perDose', '1回量', '例: 1錠')}
+      <div class="field"><label for="u-dose">1日量${d.doseCalc ? '（1回量×回数から計算）' : ''}</label>
+        <div class="other"><input id="u-dose" data-amt="dose" inputmode="decimal" value="${esc(numPart(d.dose, d))}" placeholder="例: 3" autocomplete="off"><span class="muted" style="align-self:center">${esc(doseUnit(d))}</span></div></div>
+      <div class="field"><label for="u-perDose">1回量</label>
+        <div class="other"><input id="u-perDose" data-amt="perDose" inputmode="decimal" value="${esc(numPart(u.perDose, d, perDoseUnit))}" placeholder="例: 1" autocomplete="off"><span class="muted" style="align-self:center">${esc(perDoseUnit(d))}</span></div></div>
     </div>
     <div class="field"><label>1日の回数</label><div class="sizes">${[1, 2, 3, 4].map(n => chip('uPerDay', n, u.perDay === n, n + '回')).join('')}${chip('uPerDay', 0, !u.perDay, '指定なし')}</div></div>
     <div class="field"><label>時点</label><div class="sizes">${T_ORDER.map(t => chip('uTime', t, u.times.includes(t))).join('')}</div></div>
@@ -2934,7 +2986,7 @@ function makeReview(text) {
     }
   }
   if (!clinics.length) clinics = parse(text);
-  for (const c of clinics) for (const d of c.drugs) autoMatch(d);
+  for (const c of clinics) for (const d of c.drugs) { autoMatch(d); normalizeDoses(d); }
   return { clinics, raw: text };
 }
 
@@ -3313,6 +3365,15 @@ document.addEventListener('input', e => {
   if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
   if (t.id === 'reportText') { ui.panel.text = t.value; return; }
   if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
+  if (t.dataset.amt && ui.panel?.type === 'heat') {
+    const r = findDrug(ui.panel.id);
+    if (r) {
+      if (t.dataset.amt === 'dose') { r.drug.dose = withUnit(t.value, r.drug); delete r.drug.doseCalc; }
+      else r.drug.u = { ...getU(r.drug), perDose: withUnit(t.value, r.drug, perDoseUnit) };
+      save(); refreshUsageLabel(r.drug); renderMain();
+    }
+    return;
+  }
   if (t.dataset.u && ui.panel?.type === 'heat') {
     const r = findDrug(ui.panel.id);
     if (r) { r.drug.u = { ...getU(r.drug), [t.dataset.u]: t.value.trim() }; save(); refreshUsageLabel(r.drug); renderMain(); }
