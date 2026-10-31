@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 17:44';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 20:39';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -325,6 +325,7 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .tbl-legend { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 .tbl-legend .tc { padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); }
 .tbl-detail .chip small { display: block; margin: 2px 0 0; }
+.tbl-cands { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
 .warnline { margin: 0; color: var(--warn); font-weight: 700; }
@@ -3794,6 +3795,41 @@ function parseReport(text) {
 
 /* ================= 一覧の描画 ================= */
 const toKata = s => s.replace(/[ぁ-ゖ]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60));
+// 薬品名の前方一致（入力どおりの頭から一致する製品をすべて）。ひらがな・全角半角・空白の違いは無視する
+let PREFIX_KEYS = null;
+const prefixKey = t => toKata(normalize(String(t || ''))).replace(/[\s　]+/g, '').toUpperCase();
+// 先頭に規格の数字を入れたとき（「5アムロジピン」「0.25ブロチ」）は、その規格の製剤だけにする
+function masterPrefix(q) {
+  let t = normalize(String(q || '')).trim(), st = '';
+  const m = t.match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(?=[^\d.\s])/i);
+  if (m) { st = String(+m[1]); t = t.slice(m[0].length); }
+  const k = prefixKey(t);
+  if (!Master.ready || k.length < (st ? 1 : 2)) return [];
+  if (!PREFIX_KEYS || PREFIX_KEYS.length !== Master.items.length) PREFIX_KEYS = Master.items.map(it => prefixKey(it.n));
+  const out = [];
+  for (let i = 0; i < PREFIX_KEYS.length; i++) {
+    if (!PREFIX_KEYS[i].startsWith(k)) continue;
+    const it = Master.items[i];
+    if (st && !strengthNums(it.n).includes(st)) continue;
+    out.push({ n: it.n, y: it.y || '', sim: 1, prefix: true });
+  }
+  return out.sort((a, b) => a.n.localeCompare(b.n, 'ja'));
+}
+// 表のセルの候補：入力された値で前方一致（全件）、なければあいまい検索
+function tblCandList(cell, typed) {
+  if (typed != null) { const p = masterPrefix(typed); return p.length ? p : searchMaster(typed, 10, true); }
+  if (cell.edited) { const p = masterPrefix(cell.value); if (p.length) return p; return searchMaster(cell.value, 10, true); }
+  return cell.cands || searchMaster(cell.read || cell.value, 6, true);
+}
+function tblCandHTML(list, typed) {
+  TBL.candList = list;
+  const pre = list.length && list[0].prefix;
+  const sm = String(typed || '').normalize('NFKC').trim().match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(.+)$/i);
+  const label = sm ? `「${sm[2]}」で始まる規格${sm[1]}の製剤` : `「${typed}」で始まる製品`;
+  return (pre ? `<p class="muted" style="margin:0 0 4px">${esc(label)} ${list.length}件</p>` : '')
+    + (list.map((x, i) => `<button class="cand" data-act="tblPickCand" data-i="${i}"><span class="cn">${esc(x.n)}</span>${x.prefix ? '' : `<span class="cs">一致度 ${Math.round(x.sim * 100)}%</span>`}</button>`).join('') || '<p class="muted">候補がありません</p>');
+}
+
 function matches(d) {
   const q = ui.search.trim();
   if (!q) return true;
@@ -4375,7 +4411,7 @@ const PANELS = {
         <h3>${ri + 1}行目・${ci + 1}列目${c.status !== 'ok' ? `<small>${esc(ST[c.status] || '')}</small>` : ''}</h3>
         <div class="field"><label for="tblEdit">値（直接直せます）</label><input id="tblEdit" value="${esc(c.value)}" autocomplete="off"></div>
         ${c.reads?.length ? `<div class="field"><label>それぞれの読み（タップで採用）</label><div class="chips">${c.reads.map((x, i) => `<button class="chip" data-act="tblPickRead" data-i="${i}">${esc(x.v)}<small>${SRC[x.src] || x.src}</small></button>`).join('')}</div></div>` : ''}
-        ${c.cands?.length || TBL.drugCol[ci] ? `<div class="field"><label>薬品マスターの候補（タップで採用）</label><div class="cands">${(c.cands || searchMaster(c.read || c.value, 6, true)).map((x, i) => `<button class="cand" data-act="tblPickCand" data-i="${i}"><span class="cn">${esc(x.n)}</span><span class="cs">一致度 ${Math.round(x.sim * 100)}%</span></button>`).join('') || '<p class="muted">候補がありません</p>'}</div></div>` : ''}
+        ${c.cands?.length || TBL.drugCol[ci] ? `<div class="field"><label>薬品マスターの候補（タップで採用・値を直すと前方一致で探します）</label><div class="cands tbl-cands" id="tblCands">${tblCandHTML(tblCandList(c, TBL.typed), TBL.typed)}</div></div>` : ''}
         <div class="inline"><button class="btn primary" data-act="tblOk">この値で確定</button><button class="btn ghost" data-act="tblSelClose">閉じる</button></div>
       </div>`;
     }
@@ -5098,16 +5134,17 @@ const actions = {
   rptCam: () => camOpen('rpt'),
   tblPanel: () => { TBL.note = ''; openPanel({ type: 'tbl' }); },
   tblCam: () => camOpen('tbl'),
-  tblSel: el => { TBL.sel = [+el.dataset.r, +el.dataset.c]; renderPanel(); const d = $('.tbl-detail'); if (d) d.scrollIntoView({ block: 'nearest' }); },
-  tblSelClose: () => { TBL.sel = null; renderPanel(); },
+  tblSel: el => { TBL.sel = [+el.dataset.r, +el.dataset.c]; TBL.typed = null; renderPanel(); const d = $('.tbl-detail'); if (d) d.scrollIntoView({ block: 'nearest' }); },
+  tblSelClose: () => { TBL.sel = null; TBL.typed = null; renderPanel(); },
   tblPickRead: el => { const [r, c] = TBL.sel, cell = TBL.rows[r][c], x = cell.reads[+el.dataset.i]; Object.assign(cell, { value: x.v, status: 'ok', yj: '' }); tblSave(); renderPanel(); },
   tblPickCand: el => {
     const [r, c] = TBL.sel, cell = TBL.rows[r][c];
-    const list = cell.cands || searchMaster(cell.read || cell.value, 6, true), x = list[+el.dataset.i];
+    const list = TBL.candList || tblCandList(cell, null), x = list[+el.dataset.i];
+    TBL.typed = null;
     if (x) Object.assign(cell, { value: x.n, yj: x.y || '', status: 'master', sim: x.sim });
     tblSave(); renderPanel();
   },
-  tblOk: () => { const [r, c] = TBL.sel, cell = TBL.rows[r][c], v = $('#tblEdit')?.value ?? cell.value; if (v !== cell.value) { cell.value = v; cell.yj = ''; } if (cell.status !== 'master') cell.status = 'ok'; TBL.sel = null; tblSave(); renderPanel(); },
+  tblOk: () => { const [r, c] = TBL.sel, cell = TBL.rows[r][c], v = $('#tblEdit')?.value ?? cell.value; if (v !== cell.value) { cell.value = v; cell.yj = ''; cell.cands = null; cell.edited = true; } if (cell.status !== 'master') cell.status = 'ok'; TBL.sel = null; TBL.typed = null; tblSave(); renderPanel(); },
   tblDrugCol: el => { const c = +el.dataset.c; TBL.drugCol[c] = !TBL.drugCol[c]; tblSave(); renderPanel(); },
   tblDownload: () => {
     const blob = new Blob(['﻿' + tblCSV()], { type: 'text/csv;charset=utf-8' }), a = document.createElement('a');
@@ -5279,6 +5316,12 @@ document.addEventListener('input', e => {
   if (t.id === 'search') { ui.search = t.value; renderMain(); return; }
   if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
   if (t.id === 'rptText') { RPT.text = t.value; rptSave(); return; }
+  if (t.id === 'tblEdit' && TBL.sel) {
+    TBL.typed = t.value;
+    const box = $('#tblCands'), [r, c] = TBL.sel;
+    if (box) { box.innerHTML = tblCandHTML(tblCandList(TBL.rows[r][c], t.value), t.value); box.scrollTop = 0; }
+    return;
+  }
   if (t.id === 'reportText') { ui.panel.text = t.value; return; }
   if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
   if (t.dataset.amt && ui.panel?.type === 'heat') {

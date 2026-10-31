@@ -153,6 +153,31 @@ def build(sources):
             yj_index[yj] = idx
         return idx
 
+    def item_for_brand(name, yj):
+        # 統一名収載（「アムロジピンベシル酸塩5mg錠」）は各社の製品が同じYJコードを持つ。
+        # 製品名（販売名）が違えば別の品目として残し、規格・価格・成分などは同じYJコードの品目から引き継ぐ
+        k = (yj or 'N') + '|' + norm_key(name)
+        idx = key_index.get(k)
+        if idx is not None:
+            return idx
+        base = yj_index.get(yj) if yj else None
+        if base is not None:
+            bn = norm_key(items[base]['n'])
+            if bn == norm_key(name) or re.sub(r'[「」\s]', '', bn) == re.sub(r'[「」\s]', '', norm_key(name)):
+                key_index[k] = base
+                return base
+        idx = len(items)
+        it = {'n': name, 'y': yj, 'g': [], 'h': []}
+        if base is not None:
+            for key in ('c', 's', 'p', 'ge', 'br'):
+                if key in items[base]:
+                    it[key] = items[base][key]
+        items.append(it)
+        key_index[k] = idx
+        if yj and yj not in yj_index:
+            yj_index[yj] = idx
+        return idx
+
     for fname, data in sources:
         for tname, rows in tables_from_bytes(fname, data):
             if is_medhot(rows):
@@ -163,7 +188,7 @@ def build(sources):
                     yj = row[8].upper() if YJ_RE.fullmatch(row[8].upper()) else ''
                     if not row[3]:
                         continue
-                    it = items[item_for(row[3], yj)]
+                    it = items[item_for_brand(row[3], yj)]
                     unit_code = row[29]
                     add_unique(it['g'], unit_code)
                     for v in (row[32], row[33]):
