@@ -19,6 +19,7 @@
 <style>
 /* Layout: 薬袋の仕分けトレイ — 医療機関ごとの区画に薬が並び、数量は右端の帳簿欄。入力は全画面のパネル。 */
 :root {
+  --st-master: #e3f3ec; --st-check: #fde2c8; --st-diff: #fff1a8; --st-low: #fff8d6; --hatch1: #f4f4f4; --hatch2: #e6e6e6;
   --bg: #eef2ef;
   --surface: #ffffff;
   --ink: #18221e;
@@ -40,6 +41,7 @@
     --bg: #111614; --surface: #1a211e; --ink: #e5ece8; --muted: #98a69f; --line: #2b3531;
     --accent: #4dbda4; --accent-ink: #052019; --accent-soft: #163630;
     --warn: #ee8b6d; --warn-soft: #3a211a; --pack: #e2a650; --pack-soft: #3a2c16;
+    --st-master: #17372b; --st-check: #4a2c14; --st-diff: #45400f; --st-low: #36331a; --hatch1: #232b28; --hatch2: #1a201e;
     color-scheme: dark;
   }
 }
@@ -47,6 +49,7 @@
   --bg: #111614; --surface: #1a211e; --ink: #e5ece8; --muted: #98a69f; --line: #2b3531;
   --accent: #4dbda4; --accent-ink: #052019; --accent-soft: #163630;
   --warn: #ee8b6d; --warn-soft: #3a211a; --pack: #e2a650; --pack-soft: #3a2c16;
+  --st-master: #17372b; --st-check: #4a2c14; --st-diff: #45400f; --st-low: #36331a; --hatch1: #232b28; --hatch2: #1a201e;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -261,10 +264,10 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .timing input { height: 44px; text-align: center; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .timing button { height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 20px; }
 .timing button.plus { background: var(--pack-soft); border-color: var(--pack); color: var(--pack); }
-.pk-in { margin: 2px 0 10px calc(3.6em + 8px); font-size: 13px; line-height: 1.45; color: var(--ink-2, #555); }
+.pk-in { margin: 2px 0 10px calc(3.6em + 8px); font-size: 13px; line-height: 1.45; color: var(--muted); }
 .pk-in b { color: var(--pack); font-size: 14px; margin-right: 6px; }
 .pk-in span { display: block; }
-.pk-in.none { color: var(--muted, #999); }
+.pk-in.none { color: var(--muted); }
 .pk-total { text-align: right; font-weight: 700; color: var(--pack); font-variant-numeric: tabular-nums; }
 .pick { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer; }
 .pick:first-child { border-top: 0; }
@@ -276,27 +279,27 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .menu-list .btn { text-align: left; min-height: 52px; }
 
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
-.tag.note { background: var(--bg); color: var(--ink-2, #555); font-weight: 500; border: 1px solid var(--line); }
-.tag.pack { background: var(--pack); color: #fff; }
+.tag.note { background: var(--bg); color: var(--muted); font-weight: 500; border: 1px solid var(--line); }
+.tag.pack { background: var(--pack); color: var(--surface); }
 .rp-row { display: grid; grid-template-columns: 2em minmax(0, 1fr); gap: 6px; padding: 8px 0; border-top: 1px solid var(--line); }
 .rp-row:first-of-type { border-top: 0; }
 .rp-no { font-size: 20px; line-height: 1.2; font-weight: 700; color: var(--accent, #0e6a5a); }
-.rp-dose { font-weight: 500; color: var(--ink-2, #555); }
+.rp-dose { font-weight: 500; color: var(--muted); }
 .rp-pack { padding: 6px 0; }
 .rp-warn .warnline { margin: 4px 0; }
 .rp-row .tag { white-space: normal; max-width: 100%; overflow-wrap: anywhere; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { font: inherit; font-size: 13.5px; padding: 7px 10px; border-radius: 99px; border: 1px solid var(--line); background: #fff; color: inherit; cursor: pointer; min-height: 36px; }
+.chip { font: inherit; font-size: 13.5px; padding: 7px 10px; border-radius: 99px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; min-height: 36px; }
 .chip small { margin-left: 4px; font-size: 10.5px; opacity: .75; }
-.chip.on { background: #0e6a5a; border-color: #0e6a5a; color: #fff; }
-.ins .field > label small { margin-left: 6px; font-weight: 400; color: var(--ink-2, #666); }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink, #fff); }
+.ins .field > label small { margin-left: 6px; font-weight: 400; color: var(--muted); }
 .prep { border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin: 0 0 10px; background: var(--bg); }
 .prep-when { display: flex; align-items: center; gap: 8px; margin: 8px 0; white-space: nowrap; }
 .prep-when input { height: 40px; font: inherit; font-size: 16px; }
 .ins input[type=date] { font: inherit; font-size: 16px; height: 40px; }
 .rc-set { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 4px 0 8px; }
 .rc-set > div { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; }
-.rc-set small { display: block; font-size: 11px; color: var(--ink-2, #666); }
+.rc-set small { display: block; font-size: 11px; color: var(--muted); }
 .rc-set b { font-size: 16px; }
 .rc-slot { border-top: 1px solid var(--line); padding: 6px 0; }
 .rc-sh { display: flex; gap: 10px; align-items: baseline; margin: 2px 0; }
@@ -306,19 +309,19 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .rc-it { display: grid; grid-template-columns: 1.8em minmax(0, 1fr) auto; gap: 4px; align-items: baseline; padding: 1px 0 1px 2.6em; font-size: 14px; }
 .rc-it .rp-no { font-size: 15px; }
 .rc-grid { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; width: 100%; table-layout: fixed; }
-.rc-grid caption { text-align: left; font-size: 11.5px; color: var(--ink-2, #666); padding-bottom: 2px; }
+.rc-grid caption { text-align: left; font-size: 11.5px; color: var(--muted); padding-bottom: 2px; }
 .rc-grid th, .rc-grid td { border: 1px solid var(--line); padding: 3px 1px; text-align: center; }
 .rc-grid th { font-weight: 600; background: var(--bg); }
-.rc-grid td.e { background: repeating-linear-gradient(45deg, #f4f4f4, #f4f4f4 4px, #e6e6e6 4px, #e6e6e6 8px); color: #888; }
+.rc-grid td.e { background: repeating-linear-gradient(45deg, var(--hatch1), var(--hatch1) 4px, var(--hatch2) 4px, var(--hatch2) 8px); color: var(--muted); }
 .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 6px -4px; }
 .tbl { border-collapse: collapse; font-size: 13px; min-width: 100%; }
-.tbl td { border: 1px solid var(--line); padding: 5px 6px; white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; cursor: pointer; background: #fff; }
+.tbl td { border: 1px solid var(--line); padding: 5px 6px; white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; cursor: pointer; background: var(--surface); color: var(--ink); }
 .tbl td.th { font-weight: 700; background: var(--bg); }
-.tc.st-master { background: #e3f3ec; }
-.tc.st-check { background: #fde2c8; }
-.tc.st-diff { background: #fff1a8; }
-.tc.st-low, .tc.st-single { background: #fff8d6; }
-.tbl td.sel { outline: 3px solid #0e6a5a; outline-offset: -3px; }
+.tc.st-master { background: var(--st-master); color: var(--ink); }
+.tc.st-check { background: var(--st-check); color: var(--ink); }
+.tc.st-diff { background: var(--st-diff); color: var(--ink); }
+.tc.st-low, .tc.st-single { background: var(--st-low); color: var(--ink); }
+.tbl td.sel { outline: 3px solid var(--accent); outline-offset: -3px; }
 .tbl-legend { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 .tbl-legend .tc { padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); }
 .tbl-detail .chip small { display: block; margin: 2px 0 0; }
@@ -4325,7 +4328,7 @@ const PANELS = {
 
   ocr() {
     const e = ocrEngine(), p = ui.panel;
-    const opt = (v, t, d) => `<button data-act="ocrSet" data-v="${v}" aria-pressed="${e === v}" style="display:block;width:100%;text-align:left;font:inherit;color:inherit;margin:0 0 8px;padding:12px 14px;border-radius:12px;cursor:pointer;${e === v ? 'border:2px solid #0e6a5a;background:#eef6f3' : 'border:1px solid #c9d2cf;background:#fff'}">
+    const opt = (v, t, d) => `<button data-act="ocrSet" data-v="${v}" aria-pressed="${e === v}" style="display:block;width:100%;text-align:left;font:inherit;color:inherit;margin:0 0 8px;padding:12px 14px;border-radius:12px;cursor:pointer;${e === v ? 'border:2px solid var(--accent);background:var(--accent-soft)' : 'border:1px solid var(--line);background:var(--surface)'}">
       <div style="font-weight:600;margin-bottom:2px">${e === v ? '◉' : '○'} ${t}</div><div class="muted" style="margin:0">${d}</div></button>`;
     return {
       title: '端末内の読み取り（OCR）',
