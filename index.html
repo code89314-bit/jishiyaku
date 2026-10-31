@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true;</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 17:06';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -4434,6 +4434,7 @@ const PANELS = {
         <div class="block">
           <h3>データの保存について</h3>
           <p class="muted">入力内容はこのiPhoneのブラウザ内にだけ保存され、外部には送信されません。Safariの「履歴とWebサイトデータを消去」を行うと消えます。プライベートブラウズでは保存されません。</p>
+          ${window.JISHIYAKU_VER ? `<p class="muted">アプリの版：${esc(window.JISHIYAKU_VER)}</p>` : ''}
         </div>`
     };
   }

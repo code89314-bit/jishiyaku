@@ -1,6 +1,6 @@
 /* オフラインでも開けるように、アプリ一式を端末に保存する */
 const NDL_CACHE = 'ndl-v1';
-const CACHE = 'jishiyaku-17364e3c';
+const CACHE = 'jishiyaku-43996e4d';
 const FILES = ['./', './index.html', './tesseract.min.js', './worker.min.js', './tesseract-core-lstm.wasm.js', './jpn-traineddata-gz.wasm', './manifest.webmanifest', './icon.png', './zxing-reader.js', './zxing_reader.wasm'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
@@ -14,7 +14,8 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   if (req.mode === 'navigate') {
-    e.respondWith(fetch(req).then(r => { const c = r.clone(); caches.open(CACHE).then(x => x.put('./index.html', c)); return r; })
+    // ブラウザの保存（GitHub Pagesは10分）を使わず、毎回サーバに最新版を確かめる
+    e.respondWith(fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }).then(r => { const c = r.clone(); caches.open(CACHE).then(x => x.put('./index.html', c)); return r; })
       .catch(() => caches.match('./index.html')));
     return;
   }
