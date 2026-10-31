@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 20:39';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 21:01';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -3797,18 +3797,26 @@ function parseReport(text) {
 const toKata = s => s.replace(/[ぁ-ゖ]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60));
 // 薬品名の前方一致（入力どおりの頭から一致する製品をすべて）。ひらがな・全角半角・空白の違いは無視する
 let PREFIX_KEYS = null;
-const prefixKey = t => toKata(normalize(String(t || ''))).replace(/[\s　]+/g, '').toUpperCase();
+// 塩の表記ゆれ（ロキソプロフェンNa ＝ ロキソプロフェンナトリウム など）は略記にそろえて比べる
+const SALTS = [['ナトリウム', 'NA'], ['カリウム', 'K'], ['カルシウム', 'CA'], ['マグネシウム', 'MG']];
+const prefixKey = t => { let k = toKata(normalize(String(t || ''))).replace(/[\s　]+/g, '').toUpperCase(); for (const [w, ab] of SALTS) k = k.split(w).join(ab); return k; };
+// 打ちかけの塩の名前（「…ナ」「…ナトリ」）も、略記で始まるものとして探す
+function prefixKeys(t) {
+  const k = prefixKey(t), out = [k];
+  for (const [w, ab] of SALTS) for (let n = 1; n < w.length; n++) { const p = w.slice(0, n); if (k.endsWith(p) && k.length > n) out.push(k.slice(0, -n) + ab); }
+  return [...new Set(out)];
+}
 // 先頭に規格の数字を入れたとき（「5アムロジピン」「0.25ブロチ」）は、その規格の製剤だけにする
 function masterPrefix(q) {
   let t = normalize(String(q || '')).trim(), st = '';
   const m = t.match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(?=[^\d.\s])/i);
   if (m) { st = String(+m[1]); t = t.slice(m[0].length); }
-  const k = prefixKey(t);
+  const ks = prefixKeys(t), k = ks[0];
   if (!Master.ready || k.length < (st ? 1 : 2)) return [];
   if (!PREFIX_KEYS || PREFIX_KEYS.length !== Master.items.length) PREFIX_KEYS = Master.items.map(it => prefixKey(it.n));
   const out = [];
   for (let i = 0; i < PREFIX_KEYS.length; i++) {
-    if (!PREFIX_KEYS[i].startsWith(k)) continue;
+    if (!ks.some(q => PREFIX_KEYS[i].startsWith(q))) continue;
     const it = Master.items[i];
     if (st && !strengthNums(it.n).includes(st)) continue;
     out.push({ n: it.n, y: it.y || '', sim: 1, prefix: true });
