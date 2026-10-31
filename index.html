@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 17:06';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 17:11';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -941,7 +941,7 @@ function ndlLoad(onStatus = () => {}) {
     if (!window.ort) await new Promise((res, rej) => { const s = document.createElement('script'); s.src = NDL.ortBase + 'ort.wasm.min.js'; s.onload = res; s.onerror = () => rej(new Error('ort')); document.head.appendChild(s); });
     ort.env.wasm.wasmPaths = new URL(NDL.ortBase, location.href).href;
     ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
-    ort.env.wasm.proxy = true;   // 計算は別スレッド（Web Worker）で行い、撮影中のシャッターや画面の操作を止めない
+    // 別スレッド（proxy）は iPhone の Safari で動かないことがあるため使わない。代わりに1行ごとに処理を休んで操作を受け付ける
     const files = [['deim', 20.2], ['parseq30', 18.3], ['parseq50', 19.0], ['parseq100', 23.3]];
     const totalMB = files.reduce((a, f) => a + f[1], 0); let doneMB = 0;
     NDL.chars = Array.from(JSON.parse(new TextDecoder().decode(await ndlFetch(NDL.base + 'chars.json'))));
@@ -1063,6 +1063,7 @@ async function ndlRecognize(canvas, onStatus = () => {}) {
   const ov = (a, b) => { const iw = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])), ih = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1])); return iw * ih / ((a[2] - a[0]) * (a[3] - a[1])); };
   dets = dets.filter(d => !d.split || !dets.some(q => !q.split && ov(d.box, q.box) > 0.4));
   for (let i = 0; i < dets.length; i++) {
+    await new Promise(r => setTimeout(r, 0));   // シャッターなどの操作をここで受け付ける
     onStatus(`文字を読み取り中… ${i + 1}/${dets.length}行`, 0.1 + 0.9 * i / dets.length);
     const d = dets[i];
     const [bx0, by0, bx1, by1] = d.box, r = Math.max(bx1 - bx0, by1 - by0) / Math.max(1, Math.min(bx1 - bx0, by1 - by0));
@@ -1221,6 +1222,7 @@ async function tblOcrWhole(src, onStatus = () => {}) {
     const [ry0, ry1] = grid.rows[ri], inset = Math.max(2, Math.round((ry1 - ry0) * 0.08));
     const strip = tblSqueezeRow(cv, x0t, ry0 + inset, x1t, ry1 - inset);
     if (!strip) continue;
+    await new Promise(r => setTimeout(r, 0));
     const rr = await ndlReadBox(strip, [0, 0, strip.width, strip.height]);
     (grid.rowTexts = grid.rowTexts || [])[ri] = rr.text;
     tblFillFromRow(rows[ri], rr.text, rr.conf, colUsed);
