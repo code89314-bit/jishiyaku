@@ -310,6 +310,18 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .rc-grid th, .rc-grid td { border: 1px solid var(--line); padding: 3px 1px; text-align: center; }
 .rc-grid th { font-weight: 600; background: var(--bg); }
 .rc-grid td.e { background: repeating-linear-gradient(45deg, #f4f4f4, #f4f4f4 4px, #e6e6e6 4px, #e6e6e6 8px); color: #888; }
+.tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 6px -4px; }
+.tbl { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+.tbl td { border: 1px solid var(--line); padding: 5px 6px; white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; cursor: pointer; background: #fff; }
+.tbl td.th { font-weight: 700; background: var(--bg); }
+.tc.st-master { background: #e3f3ec; }
+.tc.st-check { background: #fde2c8; }
+.tc.st-diff { background: #fff1a8; }
+.tc.st-low, .tc.st-single { background: #fff8d6; }
+.tbl td.sel { outline: 3px solid #0e6a5a; outline-offset: -3px; }
+.tbl-legend { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.tbl-legend .tc { padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); }
+.tbl-detail .chip small { display: block; margin: 2px 0 0; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
 .warnline { margin: 0; color: var(--warn); font-weight: 700; }
@@ -942,7 +954,7 @@ function ndlLoad(onStatus = () => {}) {
 }
 
 // 行の検出：正方形に余白を足して800×800に縮小、ImageNetの平均・分散で正規化
-async function ndlDetect(canvas) {
+async function ndlDetect(canvas, minScore = 0.3) {
   const W = canvas.width, H = canvas.height, S = Math.max(W, H), N = 800;
   const c = document.createElement('canvas'); c.width = N; c.height = N;
   const g = c.getContext('2d', { willReadFrequently: true });
@@ -959,7 +971,7 @@ async function ndlDetect(canvas) {
   const k = S / N, dets = [];
   for (let i = 0; i < scores.length; i++) {
     const cls = Number(labels[i]) - 1;
-    if (scores[i] < 0.3 || !NDL_LINE.has(cls)) continue;
+    if (scores[i] < minScore || !NDL_LINE.has(cls)) continue;
     const b = [boxes[i * 4] * k, boxes[i * 4 + 1] * k, boxes[i * 4 + 2] * k, boxes[i * 4 + 3] * k].map((v, j) => Math.round(Math.max(0, Math.min(j % 2 ? H : W, v))));
     if (b[2] - b[0] < 4 || b[3] - b[1] < 4) continue;
     dets.push({ box: b, conf: scores[i], cnt: cc ? Number(cc[i]) : 100 });
@@ -1004,14 +1016,26 @@ async function ndlReadLine(canvas, box, n) {
   }
   const out = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', t, [1, 3, IH, IW]) });
   const o = out[s.outputNames[0]], [, L, C] = o.dims, d = o.data;
-  let str = '';
+  let str = '', lp = 0, np = 0;
   for (let i = 0; i < L; i++) {
     let best = 0, bv = -Infinity;
     for (let j = 0; j < C; j++) { const v = d[i * C + j]; if (v > bv) { bv = v; best = j; } }
+    // 確信度：その文字の確率（softmax）
+    let se = 0; for (let j = 0; j < C; j++) se += Math.exp(d[i * C + j] - bv);
+    lp += -Math.log(se); np++;
     if (best === 0) break;
     str += NDL.chars[best - 1] || '';
   }
+  NDL.lastConf = np ? Math.exp(lp / np) : 0;
   return str;
+}
+// 枠の中を1行として読む（縦横比でモデルを選び、収まらなければ大きいモデルへ）。{ text, conf }
+async function ndlReadBox(canvas, box) {
+  const [x0, y0, x1, y1] = box, r = Math.max(x1 - x0, y1 - y0) / Math.max(1, Math.min(x1 - x0, y1 - y0));
+  let n = r < 10 ? 30 : r < 16 ? 50 : 100, text = await ndlReadLine(canvas, box, n);
+  if (n === 30 && text.length >= 25) { n = 50; text = await ndlReadLine(canvas, box, 50); }
+  if (n === 50 && text.length >= 45) { n = 100; text = await ndlReadLine(canvas, box, 100); }
+  return { text, conf: NDL.lastConf };
 }
 
 // 画像 → 行（文字列と位置）。行の縦横比で30／50／100文字のモデルを選び、収まらなければ大きいモデルへ回す
@@ -1045,11 +1069,422 @@ async function ndlRecognize(canvas, onStatus = () => {}) {
       const [x0, y0, x1, y1] = d.box, xm = (x0 + x1) >> 1;
       text = await ndlReadLine(canvas, [x0, y0, xm, y1], 100) + await ndlReadLine(canvas, [xm, y0, x1, y1], 100);
     }
-    lines.push({ box: d.box, text, conf: d.conf });
+    lines.push({ box: d.box, text, conf: d.conf, tconf: NDL.lastConf });
   }
   return lines;
 }
 
+
+/* ================= 薬品リスト（表）の読み取り → CSV =================
+   罫線を見つけてセルに分け、セルごとに読む。薬品名の列はマスターと照合し、それ以外はOCRとLLMの読みを比べて採用する。 */
+// 灰色画像（長辺 maxSide まで縮小）
+function tblGray(canvas, maxSide = 1600) {
+  const sc = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+  const w = Math.round(canvas.width * sc), h = Math.round(canvas.height * sc);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(canvas, 0, 0, w, h);
+  const px = g.getImageData(0, 0, w, h).data, gray = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) gray[i] = (px[i * 4] * 299 + px[i * 4 + 1] * 587 + px[i * 4 + 2] * 114) / 1000;
+  return { w, h, gray, sc };
+}
+// 周囲の明るさより暗い画素を「黒」とする（影・照明むらに強い）
+function tblBinarize({ w, h, gray }, win = 31, k = 0.9) {
+  const ii = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += gray[y * w + x]; ii[(y + 1) * (w + 1) + x + 1] = ii[y * (w + 1) + x + 1] + row; } }
+  const bin = new Uint8Array(w * h), r = win >> 1;
+  for (let y = 0; y < h; y++) {
+    const ya = Math.max(0, y - r), yb = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const xa = Math.max(0, x - r), xb = Math.min(w, x + r + 1);
+      const sum = ii[yb * (w + 1) + xb] - ii[ya * (w + 1) + xb] - ii[yb * (w + 1) + xa] + ii[ya * (w + 1) + xa];
+      const mean = sum / ((yb - ya) * (xb - xa));
+      bin[y * w + x] = gray[y * w + x] < mean * k && gray[y * w + x] < 200 ? 1 : 0;
+    }
+  }
+  return bin;
+}
+// 傾きを推定（−5〜5度）：黒画素を角度ごとに横へ投影し、行がくっきり分かれる角度
+function tblSkew(bin, w, h) {
+  const pts = [];
+  for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) if (bin[y * w + x]) pts.push(x, y);
+  let best = 0, bs = -1;
+  const score = a => {
+    const t = Math.tan(a * Math.PI / 180), hist = new Float64Array(h + w);
+    for (let i = 0; i < pts.length; i += 2) { const yy = Math.round(pts[i + 1] - pts[i] * t + w * 0.1); if (yy >= 0 && yy < hist.length) hist[yy]++; }
+    let s = 0; for (const v of hist) s += v * v; return s;
+  };
+  for (let a = -5; a <= 5.001; a += 0.5) { const s = score(a); if (s > bs) { bs = s; best = a; } }
+  for (let a = best - 0.4; a <= best + 0.401; a += 0.1) { const s = score(a); if (s > bs) { bs = s; best = a; } }
+  return Math.abs(best) < 0.05 ? 0 : best;
+}
+function tblRotate(canvas, deg) {
+  if (!deg) return canvas;
+  const r = deg * Math.PI / 180, W = canvas.width, H = canvas.height;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+  g.translate(W / 2, H / 2); g.rotate(-r); g.drawImage(canvas, -W / 2, -H / 2);
+  return c;
+}
+// 罫線：横（または縦）に長く続く黒の並びを数え、多い行（列）を線とする
+function tblLines(bin, w, h, horiz) {
+  const L = horiz ? w : h, M = horiz ? h : w, minRun = Math.max(20, Math.round(L / 25));
+  const cnt = new Float64Array(M);
+  for (let m = 0; m < M; m++) {
+    let run = 0, tot = 0;
+    for (let l = 0; l <= L; l++) {
+      const on = l < L && (horiz ? bin[m * w + l] : bin[l * w + m]);
+      // 1画素ずれた隣の行も見る（線の太さ・わずかな傾き）
+      const on2 = on || (l < L && m + 1 < M && (horiz ? bin[(m + 1) * w + l] : bin[l * w + m + 1]));
+      if (on2) run++; else { if (run >= minRun) tot += run; run = 0; }
+    }
+    cnt[m] = tot;
+  }
+  return cnt;
+}
+function tblPeaks(cnt, thr, minGap) {
+  const out = [];
+  for (let i = 0; i < cnt.length; i++) {
+    if (cnt[i] < thr) continue;
+    let j = i; while (j + 1 < cnt.length && cnt[j + 1] >= thr) j++;
+    let bi = i; for (let k = i; k <= j; k++) if (cnt[k] > cnt[bi]) bi = k;
+    if (out.length && bi - out[out.length - 1] < minGap) { if (cnt[bi] > cnt[out[out.length - 1]]) out[out.length - 1] = bi; }
+    else out.push(bi);
+    i = j;
+  }
+  return out;
+}
+// 表の格子を探す。戻り値：{ canvas（傾き補正後）, rows:[y0,y1][], cols:[x0,x1][], grid:true/false }
+function tblFindGrid(canvas) {
+  let G = tblGray(canvas), bin = tblBinarize(G);
+  const deg = tblSkew(bin, G.w, G.h);
+  const cv = tblRotate(canvas, deg);
+  if (deg) { G = tblGray(cv); bin = tblBinarize(G); }
+  const { w, h, sc } = G;
+  const hc = tblLines(bin, w, h, true);
+  const hs = tblPeaks(hc, Math.max(w * 0.2, Math.max(...hc) * 0.35), Math.max(6, h / 120));
+  // 縦線は、横線で囲まれた範囲の高さの半分以上続くもの
+  const top = hs.length >= 2 ? hs[0] : 0, bot = hs.length >= 2 ? hs[hs.length - 1] : h;
+  const vc = tblLines(bin, w, h, false);
+  const vs = tblPeaks(vc, Math.max((bot - top) * 0.45, h * 0.08), Math.max(6, w / 150));
+  const back = v => Math.round(v / sc);
+  const spans = (ls, min) => { const r = []; for (let i = 0; i + 1 < ls.length; i++) if (ls[i + 1] - ls[i] >= min) r.push([back(ls[i]), back(ls[i + 1])]); return r; };
+  const rows = spans(hs, h / 120), cols = spans(vs, w / 100);
+  return { canvas: cv, deg, rows, cols, grid: rows.length >= 1 && cols.length >= 2, hs: hs.map(back), vs: vs.map(back) };
+}
+// セルの中に文字がありそうか（罫線を除いた内側の黒画素の割合）
+function tblInk(canvas, box) {
+  const [x0, y0, x1, y1] = box, w = x1 - x0, h = y1 - y0;
+  if (w < 4 || h < 4) return 0;
+  const px = ndlPixels(canvas), W = canvas.width;
+  let dark = 0, n = 0;
+  for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) { const i = (y * W + x) * 4; const v = (px[i] + px[i + 1] + px[i + 2]) / 3; n++; if (v < 110) dark++; }
+  return dark / Math.max(1, n);
+}
+// 表を読む（OCR）：画像全体をそのまま読み、罫線は「どの行・列に入るか」の振り分けにだけ使う
+// （セルごとに切り出して読むより、文字の行の前後関係が残るので精度が高い）
+async function tblOcrWhole(src, onStatus = () => {}) {
+  await ndlLoad(onStatus);
+  onStatus('罫線を探しています…', 0.05);
+  const base = await ndlCanvas(src);
+  const grid = tblFindGrid(base), cv = grid.canvas;
+  const lines = (await ndlRecognize(cv, onStatus)).filter(l => l.box[2] - l.box[0] > l.box[3] - l.box[1]);
+  // 文字の行ごとの確信度は ndlRecognize では出ないので、行を読み直さずに conf=1 とし、比較は LLM との一致で行う
+  if (!grid.grid) return { rows: tblByLayout(lines, cv), grid };
+  const rows = grid.rows.map(() => grid.cols.map(() => ({ text: '', conf: 1, parts: [] })));
+  for (const l of lines) {
+    const [x0, y0, x1, y1] = l.box, yc = (y0 + y1) / 2;
+    const ri = grid.rows.findIndex(([a, b]) => yc >= a && yc < b);
+    if (ri < 0) continue;
+    // 行が列の境目をまたぐときは、文字数の割合で分ける
+    const chars = Array.from(l.text), cw = (x1 - x0) / Math.max(1, chars.length);
+    chars.forEach((ch, k) => {
+      const xc = x0 + (k + 0.5) * cw;
+      let ci = grid.cols.findIndex(([a, b]) => xc >= a && xc < b);
+      if (ci < 0) ci = xc < grid.cols[0][0] ? 0 : grid.cols.length - 1;
+      const cell = rows[ri][ci];
+      if (!cell.parts.length || cell.parts[cell.parts.length - 1].line !== l) { cell.parts.push({ line: l, t: '' }); cell.conf = Math.min(cell.conf, l.tconf ?? 1); }
+      cell.parts[cell.parts.length - 1].t += ch;
+    });
+  }
+  for (const r of rows) for (const c of r) { c.text = c.parts.map(p => p.t).join(' ').trim(); delete c.parts; }
+  // 行として検出されなかった短い文字（「1」「錠」など）：表の1行を、罫線の間の長い空白だけ詰めて1本の文字列として読み、
+  // 読めているセルの文字を目印に位置を合わせて、間に余った文字を空のセルに入れる（画像の明るさなどは変えない）
+  const x0t = grid.cols[0][0], x1t = grid.cols[grid.cols.length - 1][1];
+  const colUsed = grid.cols.map((_, ci) => rows.some(r => r[ci].text));   // どの行にも文字がない列（写真の外周など）は割り当てない
+  for (let ri = 0; ri < rows.length; ri++) {
+    if (!rows[ri].some(c => !c.text) || !rows[ri].some(c => c.text)) continue;
+    const [ry0, ry1] = grid.rows[ri], inset = Math.max(2, Math.round((ry1 - ry0) * 0.08));
+    const strip = tblSqueezeRow(cv, x0t, ry0 + inset, x1t, ry1 - inset);
+    if (!strip) continue;
+    const rr = await ndlReadBox(strip, [0, 0, strip.width, strip.height]);
+    (grid.rowTexts = grid.rowTexts || [])[ri] = rr.text;
+    tblFillFromRow(rows[ri], rr.text, rr.conf, colUsed);
+  }
+  // 空の行・列（写真の外周など）は外す
+  let out = rows.filter(r => r.some(c => c.text));
+  const keep = grid.cols.map((_, ci) => out.some(r => r[ci].text));
+  out = out.map(r => r.filter((_, ci) => keep[ci]));
+  return { rows: out, grid };
+}
+
+// 表の1行の帯から、長い空白（文字の高さの0.5倍を超える白）を詰めた画像を作る
+function tblSqueezeRow(cv, x0, y0, x1, y1) {
+  const h = y1 - y0; if (h < 6 || x1 - x0 < 10) return null;
+  const px = ndlPixels(cv), W = cv.width, keep = [], maxGap = Math.round(h * 0.5);
+  let run = 0;
+  for (let x = x0; x < x1; x++) {
+    let dark = false;
+    for (let y = y0; y < y1; y++) { const i = (y * W + x) * 4; if (px[i] + px[i + 1] + px[i + 2] < 3 * 150) { dark = true; break; } }
+    run = dark ? 0 : run + 1;
+    if (dark || run <= maxGap) keep.push(x);
+  }
+  if (keep.length < 4) return null;
+  const c = document.createElement('canvas'); c.width = keep.length; c.height = h;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  // 連続する列はまとめて写す
+  for (let k = 0; k < keep.length;) { let e = k; while (e + 1 < keep.length && keep[e + 1] === keep[e] + 1) e++; g.drawImage(cv, keep[k], y0, e - k + 1, h, k, 0, e - k + 1, h); k = e + 1; }
+  return c;
+}
+// 1行の文字列の中で、読めているセルの文字を左から順に探し、間の余りを空のセルに割り当てる
+function tblFillFromRow(row, rowText, conf, colUsed = row.map(() => true)) {
+  const R = String(rowText || '').replace(/\s+/g, ' ').trim(), norm = t => t.replace(/\s+/g, '');
+  const Rn = norm(R);
+  if (!Rn) return;
+  const anchors = [];   // [セル番号, 開始, 終了]（Rn の中の位置）
+  let ptr = 0;
+  row.forEach((c, ci) => {
+    const t = norm(c.text);
+    if (!t) return;
+    let best = null;
+    for (let L = Math.max(1, Math.floor(t.length * 0.75)); L <= Math.ceil(t.length * 1.25); L++)
+      for (let p = ptr; p + L <= Rn.length && p <= ptr + 40; p++) {
+        const sim = 1 - lev(t, Rn.slice(p, p + L)) / Math.max(t.length, L);
+        if (!best || sim > best.sim + 1e-9 || (Math.abs(sim - best.sim) < 1e-9 && p < best.p)) best = { p, L, sim };
+      }
+    if (best && best.sim >= 0.6) {
+      anchors.push([ci, best.p, best.p + best.L]); ptr = best.p + best.L;
+      const sub = Rn.slice(best.p, best.p + best.L);
+      if (sub !== t) c.alt = sub;   // 1行として読んだときの読み（違えば候補として残す）
+    }
+  });
+  // 目印と目印の間（行頭・行末も）の余りを、その間の目印にならなかったセル（空、または読み違い）へ
+  const bounds = [[-1, 0, 0], ...anchors, [row.length, Rn.length, Rn.length]];
+  for (let k = 0; k + 1 < bounds.length; k++) {
+    const [ca, , ea] = bounds[k], [cb, sb] = bounds[k + 1];
+    const slots = []; for (let ci = ca + 1; ci < cb; ci++) if (colUsed[ci] || norm(row[ci].text)) slots.push(ci);
+    const left = Rn.slice(ea, sb);
+    if (!slots.length) continue;
+    if (slots.length === 1) { if (left) row[slots[0]] = { text: left, conf, row: true, was: row[slots[0]].text }; continue; }
+    // 2つ以上：元の文字列の空白で分けた数が合えば順に入れる
+    const seg = R.replace(/\s+/g, ' '), toks = [];
+    let pos = 0;
+    for (const w of seg.split(' ')) { const st = pos; pos += w.length; if (st >= ea && pos <= sb && w) toks.push(w); }
+    if (toks.length === slots.length) slots.forEach((ci, i) => { row[ci] = { text: toks[i], conf, row: true, was: row[ci].text }; });
+  }
+}
+
+/* ---- 表：LLMの読み取りと、OCRとの突き合わせ ---- */
+const LLM_TABLE = `画像に写っている表を、そのまま書き写してください。JSONだけを返してください。
+規則：
+- 罫線で区切られたセルどおりに、上の行から順に、各行を左のセルからの配列にする。1行目の見出しも含める。
+- 文字を変えない・補わない・並べ替えない。数字・単位・記号（「」、%、μ など）もそのまま。
+- 空のセル・結合されたセルの続きは "" にする。読めない文字は「?」にする。
+- 表以外の文字（タイトル、ページ番号など）は書かない。
+出力形式：{"rows":[["","",""],["","",""]]}`;
+async function llmTable(src) {
+  const c = llmCfg(), url = await toJpegDataURL(src, 2400);
+  const r = await llmFetch('/v1/chat/completions', {
+    model: c.model, temperature: 0, max_tokens: 4000, response_format: { type: 'json_object' },
+    chat_template_kwargs: { enable_thinking: false }, experimental_speed_projection: false,
+    messages: [{ role: 'system', content: LLM_TABLE },
+      { role: 'user', content: [{ type: 'text', text: 'この画像の表を書き写してください。' }, { type: 'image_url', image_url: { url } }] }]
+  });
+  const txt = r?.choices?.[0]?.message?.content || '', m = txt.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('LLMの返答がJSONではありません');
+  const j = JSON.parse(m[0]);
+  return (Array.isArray(j.rows) ? j.rows : []).filter(Array.isArray).map(r => r.map(v => normalize(String(v ?? '')).trim()));
+}
+const tNorm = t => normalize(String(t || '')).replace(/\s+/g, '').replace(/[,，](?=\d{3}\b)/g, '');
+const tSim = (a, b) => { a = tNorm(a); b = tNorm(b); if (!a && !b) return 1; if (!a || !b) return 0; return 1 - lev(a, b) / Math.max(a.length, b.length); };
+// LLMの行・列を、OCRの行・列に合わせる（行は似ている順に並べ合わせ、列は平均の似かたで対応させる）
+function tblAlign(ocr, llm) {
+  const nc = Math.max(...ocr.map(r => r.length), 1), lc = Math.max(...llm.map(r => r.length), 1);
+  const rowSim = (a, b) => tSim(a.map(c => c.text).join(''), b.join(''));
+  // 行の対応：編集距離と同じ動的計画法（似ていれば対応、そうでなければ飛ばす）
+  const n = ocr.length, m = llm.length, D = Array.from({ length: n + 1 }, () => new Float64Array(m + 1)), B = Array.from({ length: n + 1 }, () => new Int8Array(m + 1));
+  for (let i = 1; i <= n; i++) { D[i][0] = 0; B[i][0] = 1; }
+  for (let j = 1; j <= m; j++) { D[0][j] = 0; B[0][j] = 2; }
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+    const s = rowSim(ocr[i - 1], llm[j - 1]), opts = [D[i - 1][j - 1] + (s >= 0.3 ? s : -1), D[i - 1][j], D[i][j - 1]];
+    const k = opts.indexOf(Math.max(...opts)); D[i][j] = opts[k]; B[i][j] = k;
+  }
+  const rowMap = new Array(n).fill(-1);
+  for (let i = n, j = m; i > 0 && j > 0;) { const k = B[i][j]; if (k === 0) { rowMap[i - 1] = j - 1; i--; j--; } else if (k === 1) i--; else j--; }
+  // 列の対応：OCRの列ごとに、LLMの列との平均の似かたが最も高いもの
+  const colMap = [];
+  for (let c = 0; c < nc; c++) {
+    let best = -1, bs = 0.25;
+    for (let d = 0; d < lc; d++) {
+      if (colMap.includes(d)) continue;
+      let s = 0, k = 0;
+      ocr.forEach((r, i) => { if (rowMap[i] >= 0 && r[c]?.text) { s += tSim(r[c].text, llm[rowMap[i]][d] || ''); k++; } });
+      if (k && s / k > bs) { bs = s / k; best = d; }
+    }
+    colMap.push(best);
+  }
+  return ocr.map((r, i) => r.map((_, c) => rowMap[i] >= 0 && colMap[c] >= 0 ? (llm[rowMap[i]][colMap[c]] ?? '') : null));
+}
+const isNumTxt = t => /^[-+]?\d+(?:\.\d+)?$/.test(tNorm(t));
+let TBL_MAKERS = null;
+const tblMakers = () => TBL_MAKERS && TBL_MAKERS.size ? TBL_MAKERS : (TBL_MAKERS = new Set((Master.mk || []).filter(Boolean)));
+const UNIT_WORDS = /^(錠|カプセル|C|包|g|mg|mL|ml|L|本|枚|個|瓶|袋|管|キット|筒|シート|箱|バイアル|V|A|アンプル|シリンジ|kg|μg|単位)$/;
+// OCR（画像全体・1行として）とLLMの読みから、セルの値を決める。薬品名の列はマスターと照合する
+function tblMerge(ocr, llm) {
+  const L = llm && llm.length ? tblAlign(ocr, llm) : null;
+  const nc = Math.max(...ocr.map(r => r.length), 1);
+  const cands = (r, c) => {
+    const o = ocr[r][c] || { text: '' }, out = [];
+    const add = (v, src) => {
+      v = normalize(String(v || '')).trim();
+      if (/」$/.test(v) && !/「/.test(v)) v = v.replace(/([ァ-ヴーA-Za-z0-9・]+」)$/, '「$1');   // 「トーワ」の開きかっこが読めていない
+      if (v && v !== '?') out.push({ v, src });
+    };
+    add(o.text, 'ocr'); add(o.alt, 'row'); if (L && L[r][c] != null) add(L[r][c], 'llm');
+    return out;
+  };
+  // 薬品名の列：マスターと照合して、一致度の高い候補が多い列
+  const drugCol = new Array(nc).fill(false), best = {};
+  if (Master.ready) for (let c = 0; c < nc; c++) {
+    let hit = 0, tot = 0;
+    for (let r = 0; r < ocr.length; r++) {
+      const cs = cands(r, c).filter(x => /[ァ-ヴー]{3,}|[一-龥]{3,}/.test(x.v));
+      if (!cs.length) continue;
+      tot++;
+      let b = null;
+      for (const x of cs) { const top = searchMaster(x.v, 6, true); if (top[0] && (!b || top[0].sim > b.top[0].sim)) b = { ...x, top }; }
+      best[r + ',' + c] = b;
+      if (b && b.top[0].sim >= 0.75) hit++;
+    }
+    drugCol[c] = tot >= 2 && hit / tot >= 0.5;
+  }
+  const numCol = new Array(nc).fill(false);
+  for (let c = 0; c < nc; c++) { let k = 0, t = 0; for (let r = 1; r < ocr.length; r++) { const cs = cands(r, c); if (cs.length) { t++; if (cs.some(x => isNumTxt(x.v))) k++; } } numCol[c] = t >= 2 && k / t >= 0.6; }
+  // 単位の列：錠・カプセルなどが多い列
+  const unitCol = new Array(nc).fill(false);
+  for (let c = 0; c < nc; c++) { let k = 0, t = 0; for (let r = 1; r < ocr.length; r++) { const cs = cands(r, c); if (cs.length) { t++; if (cs.some(x => UNIT_WORDS.test(tNorm(x.v)))) k++; } } unitCol[c] = t >= 3 && k / t >= 0.5; }
+  const rows = ocr.map((row, r) => Array.from({ length: nc }, (_, c) => {
+    const cs = cands(r, c);
+    const cell = { value: '', status: 'ok', reads: cs };
+    if (!cs.length) return cell;
+    if (drugCol[c]) {
+      const b = best[r + ',' + c];
+      const mr = makerOf(b?.v || ''), mc = makerOf(b?.top[0]?.n || '');
+      const makerOK = !mr || !mc || tSim(mr, mc) >= 0.6;   // 読んだメーカー名と候補のメーカー名が違えば確定しない
+      if (b && b.top[0].sim >= 0.85 && (!b.top[1] || b.top[0].sim - b.top[1].sim >= 0.02 || b.top[1].n === b.top[0].n) && strengthOK(b.v, b.top[0].n) && makerOK) {
+        Object.assign(cell, { value: b.top[0].n, yj: b.top[0].y || '', sim: b.top[0].sim, status: 'master', read: b.v });
+        return cell;
+      }
+      if (b && b.top[0].sim >= 0.5) {
+        // 値は読みのまま：2つ以上の読みが一致すればそれ、なければ LLM → 1行 → 画像全体
+        const g = new Map(); for (const x of cs) { const k = tNorm(x.v); g.set(k, [...(g.get(k) || []), x]); }
+        const agree = [...g.values()].sort((a, b) => b.length - a.length)[0];
+        // 一致しなければ、メーカー名がマスターに実在する読みを優先（「トーワ」と「トーフ」なら「トーワ」）
+        const known = x => { const m = makerOf(x.v); return !m || tblMakers().has(m); };
+        const pool = cs.filter(known).length ? cs.filter(known) : cs;
+        const v = agree.length >= 2 ? agree[0].v : (pool.find(x => x.src === 'llm') || pool.find(x => x.src === 'row') || pool[0]).v;
+        Object.assign(cell, { value: v, status: 'check', cands: b.top, read: b.v });
+        return cell;
+      }
+      // 見出しなど、薬品名でないもの → ふつうのセルとして決める
+    }
+    // 2つ以上の読みが一致すれば採用
+    const groups = new Map();
+    for (const x of cs) { const k = tNorm(x.v); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(x); }
+    const top = [...groups.values()].sort((a, b) => b.length - a.length)[0];
+    if (top.length >= 2) { cell.value = top[0].v; if (L && !top.some(x => x.src === 'llm') && cs.some(x => x.src === 'llm')) cell.status = 'diff'; return cell; }
+    if (cs.length === 1) { const o = ocr[r][c] || {}; cell.value = cs[0].v; cell.status = L ? 'single' : (o.conf ?? 1) < 0.9 ? 'low' : 'ok'; return cell; }
+    // 単位の列：単位の言葉になっている読みを優先。どれも違えば、似た字の対応表（綻→錠 など）で直して確認を求める
+    if (unitCol[c] && !UNIT_WORDS.test(tNorm(top[0].v))) {
+      const u = cs.find(x => UNIT_WORDS.test(tNorm(x.v)));
+      const fixed = u ? u.v : (cs.map(x => UNIT_FIX[tNorm(x.v)[0]]).find(Boolean) || '');
+      if (fixed) { cell.value = fixed; cell.status = 'diff'; return cell; }
+    }
+    // 規格の列：同じ行の薬品名に書かれた規格（100mg など）と合う読みを優先
+    const rowDrug = cands(r, drugCol.indexOf(true)).map(x => x.v).join(' ');
+    if (drugCol.includes(true) && cs.some(x => strengthNums(x.v).length)) {
+      const okS = cs.filter(x => { const n = strengthNums(x.v); return n.length && n.every(v => strengthNums(rowDrug).includes(v)); });
+      if (okS.length && okS.length < cs.length) { cell.value = okS[0].v; cell.status = 'diff'; return cell; }
+    }
+    // 一致しない：数値の列は数値の形の読みを、ほかは LLM → 1行として → 画像全体 の順で
+    const pref = ['llm', 'row', 'ocr'];
+    const pool = numCol[c] && cs.some(x => isNumTxt(x.v)) ? cs.filter(x => isNumTxt(x.v)) : cs;
+    pool.sort((a, b) => pref.indexOf(a.src) - pref.indexOf(b.src));
+    cell.value = pool[0].v; cell.status = 'diff';
+    return cell;
+  }));
+  return { rows, drugCol, numCol, llm: !!L };
+}
+// （比較用）セルごとに切り出して読む方式
+async function tblOcr(src, onStatus = () => {}) {
+  await ndlLoad(onStatus);
+  onStatus('罫線を探しています…', 0.05);
+  const base = await ndlCanvas(src);
+  const grid = tblFindGrid(base), cv = grid.canvas;
+  onStatus('文字の行を検出中…', 0.1);
+  let dets = await ndlDetect(cv);
+  dets = dets.filter(d => d.box[2] - d.box[0] > (d.box[3] - d.box[1]) * 0.6);
+  const rows = [];
+  if (grid.grid) {
+    const total = grid.rows.length * grid.cols.length; let k = 0;
+    for (const [ry0, ry1] of grid.rows) {
+      const row = [];
+      for (const [cx0, cx1] of grid.cols) {
+        onStatus(`セルを読み取り中… ${++k}/${total}`, 0.1 + 0.9 * k / total);
+        const pad = Math.max(2, Math.round(Math.min(ry1 - ry0, cx1 - cx0) * 0.06));
+        const cell = [cx0 + pad, ry0 + pad, cx1 - pad, ry1 - pad];
+        if (cell[2] - cell[0] < 4 || cell[3] - cell[1] < 4) { row.push({ text: '', conf: 1 }); continue; }
+        // セルにかかる文字の行を、セルの中に切り詰めて読む
+        const inside = dets.map(d => [Math.max(d.box[0], cell[0]), Math.max(d.box[1], cell[1]), Math.min(d.box[2], cell[2]), Math.min(d.box[3], cell[3]), d.box[3] - d.box[1]])
+          .filter(b => b[2] - b[0] >= 8 && b[3] - b[1] >= b[4] * 0.5)
+          .map(b => b.slice(0, 4)).sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+        const parts = [];
+        if (inside.length) for (const b of inside) parts.push(await ndlReadBox(cv, b));
+        else if (tblInk(cv, cell) > 0.01) parts.push(await ndlReadBox(cv, cell));   // 短い数字など、検出に漏れた文字
+        const text = parts.map(p => p.text).join(' ').trim();
+        row.push({ text, conf: parts.length ? Math.min(...parts.map(p => p.conf)) : 1 });
+      }
+      rows.push(row);
+    }
+  } else {
+    // 罫線がない：文字の行を高さでまとめて行にし、横の位置で列に分ける
+    const lines = [];
+    for (const d of dets) { const r = await ndlReadBox(cv, d.box); lines.push({ box: d.box, ...r }); }
+    lines.sort((a, b) => (a.box[1] + a.box[3]) - (b.box[1] + b.box[3]));
+    const groups = [];
+    for (const l of lines) {
+      const yc = (l.box[1] + l.box[3]) / 2, g = groups[groups.length - 1];
+      if (g && Math.abs(g.yc - yc) < (l.box[3] - l.box[1]) * 0.5) g.items.push(l); else groups.push({ yc, items: [l] });
+    }
+    // 列の境目：各行の文字の左端を集めて、近いものをまとめる
+    const xs = groups.flatMap(g => g.items.map(i => i.box[0])).sort((a, b) => a - b), cuts = [];
+    const tol = cv.width * 0.03;
+    for (const x of xs) { if (!cuts.length || x - cuts[cuts.length - 1].x > tol) cuts.push({ x, n: 1 }); else cuts[cuts.length - 1].n++; }
+    const colX = cuts.filter(c => c.n >= Math.max(2, groups.length * 0.3)).map(c => c.x);
+    if (!colX.length) colX.push(0);
+    for (const g of groups) {
+      const row = colX.map(() => ({ text: '', conf: 1 }));
+      for (const it of g.items.sort((a, b) => a.box[0] - b.box[0])) {
+        let ci = 0; for (let i = 0; i < colX.length; i++) if (it.box[0] >= colX[i] - tol) ci = i;
+        row[ci] = { text: (row[ci].text + ' ' + it.text).trim(), conf: Math.min(row[ci].conf, it.conf) };
+      }
+      rows.push(row);
+    }
+  }
+  return { rows, grid };
+}
+
+try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready }; } catch (e) {}
 // 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
 const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
 async function ndlCached() {
@@ -1264,6 +1699,66 @@ function rptImage(src) {
   return OCR.queue;
 }
 
+
+/* ---- 表の読み取りモード：状態・取り込み・CSV ---- */
+const TBL = (() => { let o = {}; try { o = JSON.parse(localStorage.getItem('jishiyaku.tbl') || '{}'); } catch (e) {}
+  return { rows: o.rows || [], drugCol: o.drugCol || [], header: o.header ?? true, addMaster: o.addMaster ?? true, sel: null, note: '' }; })();
+const tblSave = () => { try { localStorage.setItem('jishiyaku.tbl', JSON.stringify({ rows: TBL.rows, drugCol: TBL.drugCol, header: TBL.header, addMaster: TBL.addMaster })); } catch (e) {} };
+function tblImage(src) {
+  OCR.pending++;
+  ocrStatus(`読み取り待ち（${OCR.pending}枚）`, 0);
+  const llmJob = llmReady() ? llmTable(src).then(t => ({ t }), e => ({ err: e.message || String(e) })) : null;
+  OCR.queue = OCR.queue.then(async () => {
+    try {
+      const o = await tblOcrWhole(src, (t, p) => ocrStatus(t + (OCR.pending > 1 ? `（残り${OCR.pending}枚）` : ''), p));
+      let llm = null, note = '';
+      if (llmJob) {
+        ocrStatus('LLMサーバで表を読み取り中…（30秒ほどかかります）', 0.95);
+        const r = await llmJob;
+        if (r.t && r.t.length) { llm = r.t; note = '（端末内のOCRとLLMの読みを比べました）'; }
+        else note = `（LLMは使えませんでした${r.err ? '：' + r.err : ''}。端末内のOCRだけで読み取りました）`;
+      }
+      if (!o.rows.length && !(llm && llm.length)) throw new Error('表の文字が見つかりません');
+      const ocrRows = o.rows.length ? o.rows : llm.map(r => r.map(() => ({ text: '', conf: 0 })));
+      const m = tblMerge(ocrRows, llm);
+      let rows = m.rows;
+      // 2枚目以降：列の数が同じで、1行目が前の見出しと同じなら見出しを重ねない
+      if (TBL.rows.length) {
+        const h0 = TBL.rows[0].map(c => c.value).join(''), n0 = rows[0]?.map(c => c.value).join('') || '';
+        if (TBL.header && rows.length && tSim(h0, n0) >= 0.8) rows = rows.slice(1);
+        const nc = Math.max(TBL.rows[0].length, ...rows.map(r => r.length));
+        TBL.rows = [...TBL.rows, ...rows].map(r => Array.from({ length: nc }, (_, i) => r[i] || { value: '', status: 'ok', reads: [] }));
+        TBL.drugCol = Array.from({ length: nc }, (_, i) => !!(TBL.drugCol[i] || m.drugCol[i]));
+      } else {
+        TBL.rows = rows; TBL.drugCol = m.drugCol;
+        // 1行目が見出しか：薬品名の列が照合されず、数値でもない
+        const r0 = rows[0] || [];
+        TBL.header = !r0.some((c, i) => m.drugCol[i] && c.status === 'master') && !r0.some(c => isNumTxt(c.value));
+      }
+      tblSave();
+      OCR.pending--;
+      ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : `読み取りました${note}。色の付いたセルを確認してください。`, 1);
+      if (ui.panel?.type === 'tbl') renderPanel();
+    } catch (err) {
+      OCR.pending--; console.error(err);
+      ocrStatus('読み取れませんでした（' + (err?.message || err) + '）', 0);
+    }
+  });
+  return OCR.queue;
+}
+// CSV：薬品名の列の後ろに「YJコード」「照合」を足す（設定でオン・オフ）
+function tblCSV() {
+  const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  return TBL.rows.map((r, ri) => r.flatMap((c, ci) => {
+    const out = [c.value];
+    if (TBL.addMaster && TBL.drugCol[ci]) {
+      if (ri === 0 && TBL.header) out.push('YJコード', '照合');
+      else out.push(c.yj || '', c.status === 'master' ? '一致' : c.value ? '要確認' : '');
+    }
+    return out;
+  }).map(q).join(',')).join('\r\n');
+}
+
 /* ---- GS1バーコード（PTPのGS1データバー）を無音カメラで読む ----
    zxing-cpp（WASM）をページと一緒に置き、端末内で読み取る */
 const BC = { ready: null, timer: null, busy: false, onFound: null };
@@ -1334,7 +1829,7 @@ async function camOpen(mode = 'ocr') {
   $('#cam').classList.toggle('gs1', gs1);
   $('.cam .shutter').hidden = gs1;
   Cam.shots = 0; $('#camCount').textContent = gs1 ? 'GS1読み取り' : '撮影 0枚';
-  $('#camMsg').textContent = gs1 ? 'PTPシートのバーコードを枠の中に映してください' : mode === 'rpt' ? 'レポートの画面を枠に合わせて撮影（長いときは分けて撮影）' : '1ページずつ枠に合わせて撮影';
+  $('#camMsg').textContent = gs1 ? 'PTPシートのバーコードを枠の中に映してください' : mode === 'rpt' ? 'レポートの画面を枠に合わせて撮影（長いときは分けて撮影）' : mode === 'tbl' ? '表を正面から、罫線がまっすぐになるように撮影（長い表は分けて撮影）' : '1ページずつ枠に合わせて撮影';
   $('#cam').hidden = false;
   if (gs1) return true;
   ocrStatus(OCR.status);
@@ -1357,7 +1852,7 @@ function camShot() {
   const f = $('#camFlash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
   try { navigator.vibrate?.(30); } catch (e) {}
   Cam.shots++; $('#camCount').textContent = `撮影 ${Cam.shots}枚`;
-  if (Cam.mode === 'rpt') rptImage(c); else ocrImage(c);
+  if (Cam.mode === 'rpt') rptImage(c); else if (Cam.mode === 'tbl') tblImage(c); else ocrImage(c);
   ocrStatus(OCR.status);
 }
 async function camTorch() {
@@ -3640,6 +4135,60 @@ const PANELS = {
 
 
 
+
+  tbl() {
+    const cam = canScanGS1(), sel = TBL.sel, nc = Math.max(0, ...TBL.rows.map(r => r.length));
+    const ST = { master: 'マスターと一致', check: '薬品名を確認', diff: 'OCRとLLMの読みが違う', low: '読み取りの確信度が低い', single: '片方だけが読んだ' };
+    const SRC = { ocr: '端末OCR（画像全体）', row: '端末OCR（1行として）', llm: 'LLM' };
+    const cellTd = (c, ri, ci) => {
+      const cls = ['tc', c.status !== 'ok' ? 'st-' + c.status : '', sel && sel[0] === ri && sel[1] === ci ? 'sel' : '', TBL.header && ri === 0 ? 'th' : ''].filter(Boolean).join(' ');
+      return `<td class="${cls}" data-act="tblSel" data-r="${ri}" data-c="${ci}">${esc(c.value) || '<span class="muted">　</span>'}</td>`;
+    };
+    let detail = '';
+    if (sel && TBL.rows[sel[0]]?.[sel[1]]) {
+      const c = TBL.rows[sel[0]][sel[1]], [ri, ci] = sel;
+      detail = `<div class="block tbl-detail">
+        <h3>${ri + 1}行目・${ci + 1}列目${c.status !== 'ok' ? `<small>${esc(ST[c.status] || '')}</small>` : ''}</h3>
+        <div class="field"><label for="tblEdit">値（直接直せます）</label><input id="tblEdit" value="${esc(c.value)}" autocomplete="off"></div>
+        ${c.reads?.length ? `<div class="field"><label>それぞれの読み（タップで採用）</label><div class="chips">${c.reads.map((x, i) => `<button class="chip" data-act="tblPickRead" data-i="${i}">${esc(x.v)}<small>${SRC[x.src] || x.src}</small></button>`).join('')}</div></div>` : ''}
+        ${c.cands?.length || TBL.drugCol[ci] ? `<div class="field"><label>薬品マスターの候補（タップで採用）</label><div class="cands">${(c.cands || searchMaster(c.read || c.value, 6, true)).map((x, i) => `<button class="cand" data-act="tblPickCand" data-i="${i}"><span class="cn">${esc(x.n)}</span><span class="cs">一致度 ${Math.round(x.sim * 100)}%</span></button>`).join('') || '<p class="muted">候補がありません</p>'}</div></div>` : ''}
+        <div class="inline"><button class="btn primary" data-act="tblOk">この値で確定</button><button class="btn ghost" data-act="tblSelClose">閉じる</button></div>
+      </div>`;
+    }
+    const counts = {}; TBL.rows.forEach((r, ri) => r.forEach(c => { if (!(TBL.header && ri === 0)) counts[c.status] = (counts[c.status] || 0) + 1; }));
+    return {
+      title: '薬品リストを読む（CSV）',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>表を取り込む<small>罫線のある表（エクセルの印刷・画面など）</small></h3>
+          <div class="ocr-btns">
+            ${cam ? `<button class="btn primary" data-act="tblCam">カメラで撮る（無音）</button>` : ''}
+            <label class="btn filebtn${cam ? '' : ' primary'}" for="tblFile">画像を選ぶ</label>
+            <input type="file" id="tblFile" accept="image/*" multiple hidden>
+          </div>
+          <div class="ocr-status" id="ocrStatus" ${OCR.status ? '' : 'hidden'}>
+            <div class="ocr-bar"><span id="ocrBar" style="width:${Math.round((OCR.progress || 0) * 100)}%"></span></div>
+            <p class="muted" id="ocrMsg">${esc(OCR.status || '')}</p>
+          </div>
+          <p class="muted">罫線で行と列を見分け、画像全体を端末内のOCRで読みます。薬品名の列は医薬品マスターと照合して製品名に直します。${llmReady() ? 'LLMサーバが有効なので、LLMの読みとも比べます。' : 'LLMサーバを有効にすると、LLMの読みとも比べて精度が上がります。'}長い表は何枚かに分けて撮ると、続けて追加されます。</p>
+        </div>
+        ${TBL.rows.length ? `<div class="block">
+          <h3>読み取り結果<small>${TBL.rows.length - (TBL.header ? 1 : 0)}行・${nc}列</small></h3>
+          <div class="tbl-legend">${Object.entries(ST).filter(([k]) => counts[k]).map(([k, l]) => `<span class="tc st-${k}">${l} ${counts[k]}</span>`).join('')}</div>
+          <div class="tbl-wrap"><table class="tbl">${TBL.rows.map((r, ri) => `<tr>${r.map((c, ci) => cellTd(c, ri, ci)).join('')}</tr>`).join('')}</table></div>
+          <p class="muted">セルをタップすると、それぞれの読みとマスターの候補が出ます。</p>
+        </div>
+        ${detail}
+        <div class="block">
+          <label class="pick" style="border:0;padding:0"><input type="checkbox" id="tblHeader" ${TBL.header ? 'checked' : ''} style="width:22px;height:22px"> <span>1行目は見出し</span></label>
+          <label class="pick" style="border:0;padding:0"><input type="checkbox" id="tblAddMaster" ${TBL.addMaster ? 'checked' : ''} style="width:22px;height:22px"> <span>薬品名の列の後ろに「YJコード」「照合」の列を付ける</span></label>
+          <div class="field"><label>薬品名の列<small>タップで切替</small></label><div class="chips">${Array.from({ length: nc }, (_, ci) => `<button class="chip${TBL.drugCol[ci] ? ' on' : ''}" data-act="tblDrugCol" data-c="${ci}">${ci + 1}列目${TBL.header && TBL.rows[0]?.[ci]?.value ? '：' + esc(TBL.rows[0][ci].value.slice(0, 8)) : ''}</button>`).join('')}</div></div>
+          <div class="inline"><button class="btn primary" data-act="tblDownload">CSVを保存</button><button class="btn" data-act="tblCopy">CSVをコピー</button><button class="btn ghost danger" data-act="tblClear">消去</button></div>
+          ${TBL.note ? `<p class="okline" role="status">${esc(TBL.note)}</p>` : ''}
+        </div>` : ''}`
+    };
+  },
   recipe() {
     const doc = RPT.doc, ins = RPT.instr, w = rcWard();
     if (!doc || !ins) return { title: '分包のレシピ', left: `<button class="btn ghost" data-act="rptPanel">戻る</button>`, body: '<p class="muted">先に持参薬レポートと指示を読み取ってください。</p>' };
@@ -3865,6 +4414,7 @@ const PANELS = {
       body: `
         <div class="menu-list">
           <button class="btn primary" data-act="rptPanel">持参薬レポートを読む（服用開始・一包化）</button>
+          <button class="btn" data-act="tblPanel">薬品リスト（表）を読む → CSV</button>
           <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
           <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
           ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="ocrPanel">端末内の読み取り（${ocrEngine() === 'ndl' ? 'NDLOCR-Lite' : 'Tesseract'}）</button>` : ''}
@@ -4321,6 +4871,28 @@ const actions = {
   llmPanel: () => openPanel({ type: 'llm' }),
   rptPanel: () => { if (!RPT.doc && RPT.text.trim()) rptReparse(); openPanel({ type: 'rpt' }); },
   rptCam: () => camOpen('rpt'),
+  tblPanel: () => { TBL.note = ''; openPanel({ type: 'tbl' }); },
+  tblCam: () => camOpen('tbl'),
+  tblSel: el => { TBL.sel = [+el.dataset.r, +el.dataset.c]; renderPanel(); const d = $('.tbl-detail'); if (d) d.scrollIntoView({ block: 'nearest' }); },
+  tblSelClose: () => { TBL.sel = null; renderPanel(); },
+  tblPickRead: el => { const [r, c] = TBL.sel, cell = TBL.rows[r][c], x = cell.reads[+el.dataset.i]; Object.assign(cell, { value: x.v, status: 'ok', yj: '' }); tblSave(); renderPanel(); },
+  tblPickCand: el => {
+    const [r, c] = TBL.sel, cell = TBL.rows[r][c];
+    const list = cell.cands || searchMaster(cell.read || cell.value, 6, true), x = list[+el.dataset.i];
+    if (x) Object.assign(cell, { value: x.n, yj: x.y || '', status: 'master', sim: x.sim });
+    tblSave(); renderPanel();
+  },
+  tblOk: () => { const [r, c] = TBL.sel, cell = TBL.rows[r][c], v = $('#tblEdit')?.value ?? cell.value; if (v !== cell.value) { cell.value = v; cell.yj = ''; } if (cell.status !== 'master') cell.status = 'ok'; TBL.sel = null; tblSave(); renderPanel(); },
+  tblDrugCol: el => { const c = +el.dataset.c; TBL.drugCol[c] = !TBL.drugCol[c]; tblSave(); renderPanel(); },
+  tblDownload: () => {
+    const blob = new Blob(['﻿' + tblCSV()], { type: 'text/csv;charset=utf-8' }), a = document.createElement('a');
+    const d = new Date();
+    a.href = URL.createObjectURL(blob); a.download = `薬品リスト_${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.csv`;
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    TBL.note = 'CSVを保存しました（Excelで開ける形式・UTF-8）'; renderPanel();
+  },
+  tblCopy: async () => { try { await navigator.clipboard.writeText(tblCSV()); TBL.note = 'CSVをコピーしました'; } catch (e) { TBL.note = 'コピーできませんでした。「CSVを保存」を使ってください'; } renderPanel(); },
+  tblClear: () => { TBL.rows = []; TBL.drugCol = []; TBL.sel = null; TBL.note = ''; tblSave(); ocrStatus(''); renderPanel(); },
   recipe: () => { RCP.msg = ''; openPanel({ type: 'recipe' }); },
   rcWard: el => { RCP.ward = +el.dataset.v; rcpSave(); renderPanel(); },
   rcWardEdit: () => { RCP.editWard = !RCP.editWard; renderPanel(); },
@@ -4555,6 +5127,13 @@ document.addEventListener('change', async e => {
   if (e.target.classList?.contains('insPrepDate') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].until = isoToMD(e.target.value); rptApplyInstr(); return; }
   if (e.target.classList?.contains('insPrepRemain') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].remain = e.target.checked; rptApplyInstr(); return; }
   if (e.target.id === 'insExtra' && RPT.instr) { RPT.instr.extra = e.target.value.split('\n').map(x => x.trim()).filter(Boolean); rptApplyInstr(); return; }
+  if (e.target.id === 'tblFile' && e.target.files.length) {
+    const files = [...e.target.files]; e.target.value = '';
+    for (const f of files) tblImage(f);
+    return;
+  }
+  if (e.target.id === 'tblHeader') { TBL.header = e.target.checked; tblSave(); renderPanel(); return; }
+  if (e.target.id === 'tblAddMaster') { TBL.addMaster = e.target.checked; tblSave(); return; }
   if (e.target.id === 'rptFile' && e.target.files.length) {
     const files = [...e.target.files];
     e.target.value = '';
