@@ -938,6 +938,7 @@ function ndlLoad(onStatus = () => {}) {
     if (!window.ort) await new Promise((res, rej) => { const s = document.createElement('script'); s.src = NDL.ortBase + 'ort.wasm.min.js'; s.onload = res; s.onerror = () => rej(new Error('ort')); document.head.appendChild(s); });
     ort.env.wasm.wasmPaths = new URL(NDL.ortBase, location.href).href;
     ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1;
+    ort.env.wasm.proxy = true;   // 計算は別スレッド（Web Worker）で行い、撮影中のシャッターや画面の操作を止めない
     const files = [['deim', 20.2], ['parseq30', 18.3], ['parseq50', 19.0], ['parseq100', 23.3]];
     const totalMB = files.reduce((a, f) => a + f[1], 0); let doneMB = 0;
     NDL.chars = Array.from(JSON.parse(new TextDecoder().decode(await ndlFetch(NDL.base + 'chars.json'))));
@@ -1846,14 +1847,15 @@ function camClose() {
 function camShot() {
   const v = $('#camVideo');
   if (!v.videoWidth) return;
-  const c = document.createElement('canvas');
-  c.width = v.videoWidth; c.height = v.videoHeight;
-  c.getContext('2d').drawImage(v, 0, 0);
+  // 先に画面で反応を返し（フラッシュ・振動・枚数）、そのフレームを写し取ってから読み取りを予約する
   const f = $('#camFlash'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
   try { navigator.vibrate?.(30); } catch (e) {}
   Cam.shots++; $('#camCount').textContent = `撮影 ${Cam.shots}枚`;
-  if (Cam.mode === 'rpt') rptImage(c); else if (Cam.mode === 'tbl') tblImage(c); else ocrImage(c);
-  ocrStatus(OCR.status);
+  const c = document.createElement('canvas');
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  const mode = Cam.mode;
+  setTimeout(() => { if (mode === 'rpt') rptImage(c); else if (mode === 'tbl') tblImage(c); else ocrImage(c); ocrStatus(OCR.status); }, 0);
 }
 async function camTorch() {
   const track = Cam.stream?.getVideoTracks()[0];
