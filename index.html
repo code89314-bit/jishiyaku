@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 17:11';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 17:44';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -1175,7 +1175,46 @@ function tblFindGrid(canvas) {
   const back = v => Math.round(v / sc);
   const spans = (ls, min) => { const r = []; for (let i = 0; i + 1 < ls.length; i++) if (ls[i + 1] - ls[i] >= min) r.push([back(ls[i]), back(ls[i + 1])]); return r; };
   const rows = spans(hs, h / 120), cols = spans(vs, w / 100);
-  return { canvas: cv, deg, rows, cols, grid: rows.length >= 1 && cols.length >= 2, hs: hs.map(back), vs: vs.map(back) };
+  if (rows.length >= 1 && cols.length >= 2) return { canvas: cv, deg, rows, cols, grid: true, hs: hs.map(back), vs: vs.map(back) };
+  // 罫線がない（または縦線がない）表：文字のない横の帯で行を、全行に共通する文字のない縦の帯で列を分ける
+  const v = tblVirtualGrid(bin, w, h);
+  if (v) return { canvas: cv, deg, rows: v.rows.map(([a, b]) => [back(a), back(b)]), cols: v.cols.map(([a, b]) => [back(a), back(b)]), grid: true, virtual: true };
+  return { canvas: cv, deg, rows, cols, grid: false };
+}
+function tblVirtualGrid(bin, w, h) {
+  // 行：黒画素のある横の帯
+  const rp = new Uint32Array(h);
+  for (let y = 0; y < h; y++) { let n = 0; for (let x = 0; x < w; x++) n += bin[y * w + x]; rp[y] = n; }
+  let bands = [];
+  for (let y = 0; y < h; y++) {
+    if (rp[y] <= Math.max(2, w * 0.006)) continue;
+    let e = y; while (e + 1 < h && rp[e + 1] > Math.max(2, w * 0.006)) e++;
+    bands.push([y, e + 1]); y = e;
+  }
+  if (bands.length < 2) return null;
+  const hs = bands.map(b => b[1] - b[0]).sort((a, b) => a - b), mh = hs[hs.length >> 1];
+  // 文字の一部どうし（濁点など）の小さなすき間はつなぐ。細すぎる帯（ごみ）は捨てる
+  const merged = [];
+  for (const b of bands) { const l = merged[merged.length - 1]; if (l && b[0] - l[1] < mh * 0.25) l[1] = b[1]; else merged.push([...b]); }
+  bands = merged.filter(b => b[1] - b[0] >= mh * 0.4);
+  if (bands.length < 2) return null;
+  const rows = bands.map((b, i) => [i ? Math.round((bands[i - 1][1] + b[0]) / 2) : Math.max(0, b[0] - 4), i + 1 < bands.length ? Math.round((b[1] + bands[i + 1][0]) / 2) : Math.min(h, b[1] + 4)]);
+  // 列：表の範囲で、どの行にも黒画素がない縦の帯（文字の高さの0.8倍以上の幅）
+  const top = bands[0][0], bot = bands[bands.length - 1][1], cp = new Uint32Array(w);
+  const noise = Math.max(1, Math.round((bot - top) * 0.012));   // 写真のざらつきの点は無視する
+  for (let x = 0; x < w; x++) { let n = 0; for (let y = top; y < bot; y++) n += bin[y * w + x]; cp[x] = n > noise ? n : 0; }
+  let x0 = 0; while (x0 < w && !cp[x0]) x0++;
+  let x1 = w - 1; while (x1 > x0 && !cp[x1]) x1--;
+  const minGap = Math.max(8, Math.round(mh * 0.8)), cuts = [];
+  for (let x = x0; x <= x1; x++) {
+    if (cp[x]) continue;
+    let e = x; while (e + 1 <= x1 && !cp[e + 1]) e++;
+    if (e - x + 1 >= minGap) cuts.push(Math.round((x + e) / 2));
+    x = e;
+  }
+  const edges = [Math.max(0, x0 - 4), ...cuts, Math.min(w, x1 + 5)];
+  const cols = []; for (let i = 0; i + 1 < edges.length; i++) cols.push([edges[i], edges[i + 1]]);
+  return cols.length >= 2 ? { rows, cols } : null;
 }
 // セルの中に文字がありそうか（罫線を除いた内側の黒画素の割合）
 function tblInk(canvas, box) {
@@ -1194,38 +1233,106 @@ async function tblOcrWhole(src, onStatus = () => {}) {
   const base = await ndlCanvas(src);
   const grid = tblFindGrid(base), cv = grid.canvas;
   const lines = (await ndlRecognize(cv, onStatus)).filter(l => l.box[2] - l.box[0] > l.box[3] - l.box[1]);
+  // 罫線がない表（縦の罫線がない表も）：見つけた文字の行の枠から、行と列を決める（紙の縁や写真のざらつきに強い）
+  if (!grid.grid || grid.virtual) { const g2 = tblGridFromLines(lines, cv); if (g2) Object.assign(grid, g2, { grid: true, virtual: true }); }
   // 文字の行ごとの確信度は ndlRecognize では出ないので、行を読み直さずに conf=1 とし、比較は LLM との一致で行う
   if (!grid.grid) return { rows: tblByLayout(lines, cv), grid };
   const rows = grid.rows.map(() => grid.cols.map(() => ({ text: '', conf: 1, parts: [] })));
-  for (const l of lines) {
+  // 文字の行を、かかっている列のセルへ入れる
+  const assignLine = (l, riFixed) => {
     const [x0, y0, x1, y1] = l.box, yc = (y0 + y1) / 2;
-    const ri = grid.rows.findIndex(([a, b]) => yc >= a && yc < b);
-    if (ri < 0) continue;
-    // 行が列の境目をまたぐときは、文字数の割合で分ける
-    const chars = Array.from(l.text), cw = (x1 - x0) / Math.max(1, chars.length);
-    chars.forEach((ch, k) => {
-      const xc = x0 + (k + 0.5) * cw;
-      let ci = grid.cols.findIndex(([a, b]) => xc >= a && xc < b);
-      if (ci < 0) ci = xc < grid.cols[0][0] ? 0 : grid.cols.length - 1;
-      const cell = rows[ri][ci];
-      if (!cell.parts.length || cell.parts[cell.parts.length - 1].line !== l) { cell.parts.push({ line: l, t: '' }); cell.conf = Math.min(cell.conf, l.tconf ?? 1); }
-      cell.parts[cell.parts.length - 1].t += ch;
+    const ri = riFixed ?? grid.rows.findIndex(([a, b]) => yc >= a && yc < b);
+    if (ri < 0) return;
+    // 文字の行が列の境目をまたぐとき：各列の中で実際に文字（インク）がある幅の比率で、読んだ文字列を分ける（読み直さない）
+    const px = ndlPixels(cv), W = cv.width;
+    const segs = grid.cols.map(([a, b], ci) => {
+      let ix0 = -1, ix1 = -1;
+      for (let x = Math.max(x0, a); x < Math.min(x1, b); x++) {
+        let dark = false;
+        for (let y = y0; y < y1; y += 2) { const p = (y * W + x) * 4; if (px[p] + px[p + 1] + px[p + 2] < 3 * 140) { dark = true; break; } }
+        if (dark) { if (ix0 < 0) ix0 = x; ix1 = x; }
+      }
+      return { ci, w: ix0 < 0 ? 0 : ix1 - ix0 + 1 };
+    }).filter(sg => sg.w >= (y1 - y0) * 0.35);
+    if (segs.length <= 1) {
+      const ci = segs.length ? segs[0].ci : Math.max(0, grid.cols.findIndex(([a, b]) => (x0 + x1) / 2 < b));
+      const cell = rows[ri][ci]; cell.parts.push({ t: l.text }); cell.conf = Math.min(cell.conf, l.tconf ?? 1);
+      return;
+    }
+    // 読みの空白で、かかっている列の数にちょうど分かれるならそれを使う
+    const toks = l.text.trim().split(/\s+/);
+    if (toks.length === segs.length) {
+      segs.forEach((sg, si) => { const cell = rows[ri][sg.ci]; cell.parts.push({ t: toks[si] }); cell.conf = Math.min(cell.conf, l.tconf ?? 1); });
+      return;
+    }
+    const chars = Array.from(l.text.replace(/\s+/g, '')), wt = chars.map(ch => /[\x20-\x7e｡-ﾟ]/.test(ch) ? 0.55 : 1);
+    const totW = segs.reduce((a, sg) => a + sg.w, 0), totC = wt.reduce((a, b) => a + b, 0);
+    // 区切りの位置：インクの幅の比率から出した位置の前後2文字で、最も切れ目らしいところ
+    const cls = ch => /[0-9]/.test(ch) ? 'd' : ch === '.' ? '.' : /[A-Za-zμ%]/.test(ch) ? 'a' : /[」)）]/.test(ch) ? 'c' : 'k';
+    const goodness = k => {   // chars[k-1] と chars[k] の間で切る
+      if (k <= 0 || k >= chars.length) return -9;
+      const p = cls(chars[k - 1]), n = cls(chars[k]);
+      if (p === '.' || n === '.' || (p === 'd' && n === 'd')) return -3;    // 数字の途中・小数点では切らない
+      if (p === 'c') return 2;                                            // 「…」の直後
+      if (p === 'a' && n === 'd') return 2;                               // 5mg|120
+      if (p === 'd' && n === 'k') return 1;                               // 120|錠
+      if (p !== n) return 0.5;
+      return 0;
+    };
+    const cuts = []; let accW = 0, prev = 0;
+    for (let si = 0; si + 1 < segs.length; si++) {
+      accW += segs[si].w;
+      const target = totC * accW / totW;
+      let acc = 0, k0 = 0; while (k0 < chars.length && acc + wt[k0] / 2 <= target) { acc += wt[k0]; k0++; }
+      let best = k0, bs = -Infinity;
+      for (let k = Math.max(prev + 1, k0 - 2); k <= Math.min(chars.length - 1, k0 + 2); k++) { const sc2 = goodness(k) - Math.abs(k - k0) * 0.6; if (sc2 > bs) { bs = sc2; best = k; } }
+      cuts.push(best); prev = best;
+    }
+    const bounds = [0, ...cuts, chars.length];
+    segs.forEach((sg, si) => {
+      const t = chars.slice(bounds[si], bounds[si + 1]).join('');
+      if (t) { const cell = rows[ri][sg.ci]; cell.parts.push({ t }); cell.conf = Math.min(cell.conf, l.tconf ?? 1); }
     });
-  }
+  };
+  for (const l of lines) assignLine(l);
   for (const r of rows) for (const c of r) { c.text = c.parts.map(p => p.t).join(' ').trim(); delete c.parts; }
   // 行として検出されなかった短い文字（「1」「錠」など）：表の1行を、罫線の間の長い空白だけ詰めて1本の文字列として読み、
   // 読めているセルの文字を目印に位置を合わせて、間に余った文字を空のセルに入れる（画像の明るさなどは変えない）
   const x0t = grid.cols[0][0], x1t = grid.cols[grid.cols.length - 1][1];
   const colUsed = grid.cols.map((_, ci) => rows.some(r => r[ci].text));   // どの行にも文字がない列（写真の外周など）は割り当てない
+  const colLen = grid.cols.map((_, ci) => Math.max(0, ...rows.map(r => r[ci].text.replace(/\s+/g, '').length)));   // 列ごとの最も長い値
   for (let ri = 0; ri < rows.length; ri++) {
-    if (!rows[ri].some(c => !c.text) || !rows[ri].some(c => c.text)) continue;
+    if (!rows[ri].some(c => !c.text)) continue;
+    if (!rows[ri].some(c => c.text)) {
+      if (!grid.filled?.[ri]) continue;   // 補った行だけ（罫線の表の外周などの空の行は読まない）
+      // 文字の行が1つも見つからなかった行：1行として読んで、各列の文字の幅に合わせて分ける
+      const [ry0, ry1] = grid.rows[ri], strip = tblSqueezeRow(cv, x0t, ry0, x1t, ry1);
+      if (!strip) continue;
+      await new Promise(r => setTimeout(r, 0));
+      const rr = await ndlReadBox(strip, [0, 0, strip.width, strip.height]);
+      if (!rr.text) continue;
+      rows[ri].forEach(c => { c.parts = []; });
+      assignLine({ box: [x0t, ry0, x1t, ry1], text: rr.text, tconf: rr.conf }, ri);
+      rows[ri].forEach(c => { c.text = (c.parts || []).map(p => p.t).join(' ').trim(); delete c.parts; c.row = true; });
+      continue;
+    }
     const [ry0, ry1] = grid.rows[ri], inset = Math.max(2, Math.round((ry1 - ry0) * 0.08));
     const strip = tblSqueezeRow(cv, x0t, ry0 + inset, x1t, ry1 - inset);
     if (!strip) continue;
     await new Promise(r => setTimeout(r, 0));
     const rr = await ndlReadBox(strip, [0, 0, strip.width, strip.height]);
     (grid.rowTexts = grid.rowTexts || [])[ri] = rr.text;
-    tblFillFromRow(rows[ri], rr.text, rr.conf, colUsed);
+    tblFillFromRow(rows[ri], rr.text, rr.conf, colUsed, colLen);
+  }
+  // 隣り合う2列で、同じ行に両方の値が入ることがほとんどない（1桁と2桁の番号がずれた、など）なら1つの列にまとめる
+  for (let ci = 0; ci + 1 < rows[0]?.length; ci++) {
+    const both = rows.filter(r => r[ci].text && r[ci + 1].text).length;
+    const a1 = rows.filter(r => r[ci].text).length, a2 = rows.filter(r => r[ci + 1].text).length;
+    if (a1 && a2 && both <= Math.max(0, Math.floor(rows.length * 0.08))) {
+      for (const r of rows) { const x = r[ci], y = r[ci + 1]; r.splice(ci, 2, { ...(x.text ? x : y), text: [x.text, y.text].filter(Boolean).join(' '), conf: Math.min(x.conf, y.conf) }); }
+      grid.cols.splice(ci, 2, [grid.cols[ci][0], grid.cols[ci + 1][1]]);
+      ci--;
+    }
   }
   // 空の行・列（写真の外周など）は外す
   let out = rows.filter(r => r.some(c => c.text));
@@ -1234,6 +1341,100 @@ async function tblOcrWhole(src, onStatus = () => {}) {
   return { rows: out, grid };
 }
 
+
+// 文字の行の枠から格子を作る：行は高さの位置でまとめ、列は「ほとんどの行で文字がない縦のすき間」で分ける
+function tblGridFromLines(lines, cv) {
+  if (lines.length < 4) return null;
+  const sorted = [...lines].sort((a, b) => (a.box[1] + a.box[3]) - (b.box[1] + b.box[3]));
+  const groups = [];
+  for (const l of sorted) {
+    const yc = (l.box[1] + l.box[3]) / 2, g = groups[groups.length - 1];
+    if (g && Math.abs(g.yc - yc) < (l.box[3] - l.box[1]) * 0.5) { g.items.push(l); g.y0 = Math.min(g.y0, l.box[1]); g.y1 = Math.max(g.y1, l.box[3]); }
+    else groups.push({ yc, items: [l], y0: l.box[1], y1: l.box[3] });
+  }
+  if (groups.length < 2) return null;
+  const hs = sorted.map(l => l.box[3] - l.box[1]).sort((a, b) => a - b), mh = hs[hs.length >> 1];
+  {
+    // 文字の行が1つも見つからなかった行：表の横の範囲で、黒のある横の帯を探して補う
+    const G0 = tblGray(cv), b0 = tblBinarize(G0), s0 = G0.sc, gw0 = G0.w;
+    const xa0 = Math.max(0, Math.round(Math.min(...lines.map(l => l.box[0])) * s0)), xb0 = Math.min(gw0, Math.round(Math.max(...lines.map(l => l.box[2])) * s0));
+    const ya0 = Math.round(groups[0].y0 * s0), yb0 = Math.round(groups[groups.length - 1].y1 * s0), thr = Math.max(3, (xb0 - xa0) * 0.01);
+    for (let y = ya0; y < yb0; y++) {
+      let n = 0; for (let x = xa0; x < xb0; x++) n += b0[y * gw0 + x];
+      if (n <= thr) continue;
+      let e = y;
+      for (; e + 1 < yb0; e++) { let m2 = 0; for (let x = xa0; x < xb0; x++) m2 += b0[(e + 1) * gw0 + x]; if (m2 <= thr) break; }
+      const Y0 = y / s0, Y1 = (e + 1) / s0;
+      if (Y1 - Y0 >= mh * 0.5 && Y1 - Y0 <= mh * 1.8 && !groups.some(g => Math.min(g.y1, Y1) - Math.max(g.y0, Y0) > 0)) {
+        groups.push({ yc: (Y0 + Y1) / 2, items: [], y0: Math.round(Y0), y1: Math.round(Y1), filled: true });
+      }
+      y = e;
+    }
+    groups.sort((a, b) => a.yc - b.yc);
+    // 行の間隔：普段の間隔のほぼ2倍（以上）あいている所には、検出に漏れた行があるとみなして入れる
+    const gaps = groups.slice(1).map((g, i) => g.yc - groups[i].yc).sort((a, b) => a - b);
+    const pitch = gaps.length ? gaps[gaps.length >> 1] : 0;
+    if (pitch > mh * 0.8) {
+      for (let i = groups.length - 1; i > 0; i--) {
+        const d = groups[i].yc - groups[i - 1].yc, k = Math.round(d / pitch);
+        if (k < 2 || d < pitch * 1.6) continue;
+        for (let t = k - 1; t >= 1; t--) {
+          const yc = groups[i - 1].yc + d * t / k;
+          groups.splice(i, 0, { yc, items: [], y0: Math.round(yc - mh / 2), y1: Math.round(yc + mh / 2), filled: true });
+        }
+      }
+    }
+  }
+  const rows = groups.map((g, i) => [i ? Math.round((groups[i - 1].y1 + g.y0) / 2) : Math.max(0, g.y0 - 4), i + 1 < groups.length ? Math.round((g.y1 + groups[i + 1].y0) / 2) : Math.min(cv.height, g.y1 + 4)]);
+  // 列：行の帯の中だけで、x ごとに文字（黒）がある行の数を数える。帯を上から下まで貫く線（紙の縁・縦線）は境目とみなす
+  const G = tblGray(cv), bin = tblBinarize(G), sc = G.sc, gw = G.w, W = cv.width;
+  const bands = groups.map(g => [Math.max(0, Math.round(g.y0 * sc)), Math.min(G.h, Math.round(g.y1 * sc))]);
+  const bandH = bands.reduce((a, [p, q]) => a + q - p, 0);
+  const cover = new Uint16Array(gw), solid = new Uint8Array(gw);
+  for (let x = 0; x < gw; x++) {
+    let rowsHit = 0, dark = 0;
+    for (const [p, q] of bands) {
+      let n = 0; for (let y = p; y < q; y++) n += bin[y * gw + x];
+      dark += n; if (n > Math.max(1, (q - p) * 0.06)) rowsHit++;
+    }
+    cover[x] = rowsHit; solid[x] = dark > bandH * 0.85 ? 1 : 0;
+  }
+  for (let x = 0; x < gw; x++) if (solid[x]) cover[x] = 0;
+  let xa = 0; while (xa < gw && !cover[xa]) xa++;
+  let xb = gw - 1; while (xb > xa && !cover[xb]) xb--;
+  const lim = Math.max(0, Math.floor(groups.length * 0.1)), minGap = Math.max(4, Math.round(mh * sc * 0.6)), cuts = [];
+  for (let x = xa; x < xb; x++) {
+    if (cover[x] > lim) continue;
+    let e = x; while (e + 1 < xb && cover[e + 1] <= lim) e++;
+    if (e - x + 1 >= minGap) cuts.push(Math.round((x + e) / 2 / sc));
+    x = e;
+  }
+  xa = Math.round(xa / sc); xb = Math.round(xb / sc);
+  const edges = [Math.max(0, xa - 4), ...cuts, Math.min(W, xb + 4)];
+  const cols = []; for (let i = 0; i + 1 < edges.length; i++) cols.push([edges[i], edges[i + 1]]);
+  return cols.length >= 2 ? { rows, cols, filled: groups.map(g => !!g.filled) } : null;
+}
+// 罫線がない表：文字の行を高さでまとめて行にし、左端の位置で列に分ける
+function tblByLayout(lines, cv) {
+  lines = [...lines].sort((a, b) => (a.box[1] + a.box[3]) - (b.box[1] + b.box[3]));
+  const groups = [];
+  for (const l of lines) {
+    const yc = (l.box[1] + l.box[3]) / 2, g = groups[groups.length - 1];
+    if (g && Math.abs(g.yc - yc) < (l.box[3] - l.box[1]) * 0.5) g.items.push(l); else groups.push({ yc, items: [l] });
+  }
+  const xs = groups.flatMap(g => g.items.map(i => i.box[0])).sort((a, b) => a - b), cuts = [], tol = cv.width * 0.03;
+  for (const x of xs) { if (!cuts.length || x - cuts[cuts.length - 1].x > tol) cuts.push({ x, n: 1 }); else cuts[cuts.length - 1].n++; }
+  const colX = cuts.filter(c => c.n >= Math.max(2, groups.length * 0.3)).map(c => c.x);
+  if (!colX.length) colX.push(0);
+  return groups.map(g => {
+    const row = colX.map(() => ({ text: '', conf: 1 }));
+    for (const it of g.items.sort((a, b) => a.box[0] - b.box[0])) {
+      let ci = 0; for (let i = 0; i < colX.length; i++) if (it.box[0] >= colX[i] - tol) ci = i;
+      row[ci] = { text: (row[ci].text + ' ' + it.text).trim(), conf: Math.min(row[ci].conf, it.tconf ?? 1) };
+    }
+    return row;
+  });
+}
 // 表の1行の帯から、長い空白（文字の高さの0.5倍を超える白）を詰めた画像を作る
 function tblSqueezeRow(cv, x0, y0, x1, y1) {
   const h = y1 - y0; if (h < 6 || x1 - x0 < 10) return null;
@@ -1253,7 +1454,9 @@ function tblSqueezeRow(cv, x0, y0, x1, y1) {
   return c;
 }
 // 1行の文字列の中で、読めているセルの文字を左から順に探し、間の余りを空のセルに割り当てる
-function tblFillFromRow(row, rowText, conf, colUsed = row.map(() => true)) {
+function tblFillFromRow(row, rowText, conf, colUsed = row.map(() => true), colLen = row.map(() => 99)) {
+  // 余りの文字を入れてよいか：文字・数字を含み、その列のほかの値より極端に長くない
+  const plausible = (ci, t) => !!t && /[ぁ-んァ-ヴ一-龥A-Za-z0-9]/.test(t) && t.length <= Math.max(3, colLen[ci] * 1.6);
   const R = String(rowText || '').replace(/\s+/g, ' ').trim(), norm = t => t.replace(/\s+/g, '');
   const Rn = norm(R);
   if (!Rn) return;
@@ -1281,12 +1484,12 @@ function tblFillFromRow(row, rowText, conf, colUsed = row.map(() => true)) {
     const slots = []; for (let ci = ca + 1; ci < cb; ci++) if (colUsed[ci] || norm(row[ci].text)) slots.push(ci);
     const left = Rn.slice(ea, sb);
     if (!slots.length) continue;
-    if (slots.length === 1) { if (left) row[slots[0]] = { text: left, conf, row: true, was: row[slots[0]].text }; continue; }
+    if (slots.length === 1) { if (plausible(slots[0], left)) row[slots[0]] = { text: left, conf, row: true, was: row[slots[0]].text }; continue; }
     // 2つ以上：元の文字列の空白で分けた数が合えば順に入れる
     const seg = R.replace(/\s+/g, ' '), toks = [];
     let pos = 0;
     for (const w of seg.split(' ')) { const st = pos; pos += w.length; if (st >= ea && pos <= sb && w) toks.push(w); }
-    if (toks.length === slots.length) slots.forEach((ci, i) => { row[ci] = { text: toks[i], conf, row: true, was: row[ci].text }; });
+    if (toks.length === slots.length && toks.every((t, i) => plausible(slots[i], t))) slots.forEach((ci, i) => { row[ci] = { text: toks[i], conf, row: true, was: row[ci].text }; });
   }
 }
 
@@ -1339,7 +1542,17 @@ function tblAlign(ocr, llm) {
     }
     colMap.push(best);
   }
-  return ocr.map((r, i) => r.map((_, c) => rowMap[i] >= 0 && colMap[c] >= 0 ? (llm[rowMap[i]][colMap[c]] ?? '') : null));
+  const cell = (j, c) => colMap[c] >= 0 ? (llm[j][colMap[c]] ?? '') : null;
+  const out = ocr.map((r, i) => ({ ocr: r, llm: rowMap[i] >= 0 ? r.map((_, c) => cell(rowMap[i], c)) : r.map(() => null) }));
+  // OCRが見落としたLLMだけの行は、前後の対応から位置を決めて入れる
+  const used = new Set(rowMap.filter(j => j >= 0));
+  for (let j = m - 1; j >= 0; j--) {
+    if (used.has(j) || !llm[j].some(v => v)) continue;
+    let pos = out.length;
+    for (let i = 0; i < out.length; i++) { const k = out[i].src ?? rowMap[i]; if (k != null && k > j) { pos = i; break; } }
+    out.splice(pos, 0, { ocr: Array.from({ length: nc }, () => ({ text: '', conf: 0 })), llm: Array.from({ length: nc }, (_, c) => cell(j, c)), src: j, llmOnly: true });
+  }
+  return out;
 }
 const isNumTxt = t => /^[-+]?\d+(?:\.\d+)?$/.test(tNorm(t));
 let TBL_MAKERS = null;
@@ -1347,7 +1560,8 @@ const tblMakers = () => TBL_MAKERS && TBL_MAKERS.size ? TBL_MAKERS : (TBL_MAKERS
 const UNIT_WORDS = /^(錠|カプセル|C|包|g|mg|mL|ml|L|本|枚|個|瓶|袋|管|キット|筒|シート|箱|バイアル|V|A|アンプル|シリンジ|kg|μg|単位)$/;
 // OCR（画像全体・1行として）とLLMの読みから、セルの値を決める。薬品名の列はマスターと照合する
 function tblMerge(ocr, llm) {
-  const L = llm && llm.length ? tblAlign(ocr, llm) : null;
+  let L = null;
+  if (llm && llm.length) { const al = tblAlign(ocr, llm); ocr = al.map(x => x.ocr); L = al.map(x => x.llm); }
   const nc = Math.max(...ocr.map(r => r.length), 1);
   const cands = (r, c) => {
     const o = ocr[r][c] || { text: '' }, out = [];
@@ -1397,7 +1611,10 @@ function tblMerge(ocr, llm) {
         const agree = [...g.values()].sort((a, b) => b.length - a.length)[0];
         // 一致しなければ、メーカー名がマスターに実在する読みを優先（「トーワ」と「トーフ」なら「トーワ」）
         const known = x => { const m = makerOf(x.v); return !m || tblMakers().has(m); };
-        const pool = cs.filter(known).length ? cs.filter(known) : cs;
+        const scored = cs.map(x => ({ ...x, sim: (searchMaster(x.v, 1, true)[0] || { sim: 0 }).sim }));
+        const bestSim = Math.max(...scored.map(x => x.sim));
+        let pool = scored.filter(x => x.sim >= bestSim - 0.08);             // 一致度が明らかに低い読み（途中で切れた名前など）は外す
+        if (pool.filter(known).length) pool = pool.filter(known);
         const v = agree.length >= 2 ? agree[0].v : (pool.find(x => x.src === 'llm') || pool.find(x => x.src === 'row') || pool[0]).v;
         Object.assign(cell, { value: v, status: 'check', cands: b.top, read: b.v });
         return cell;
