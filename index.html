@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-10-31 21:01';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-01 10:13';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -1601,7 +1601,7 @@ function tblMerge(ocr, llm) {
     if (drugCol[c]) {
       const b = best[r + ',' + c];
       const mr = makerOf(b?.v || ''), mc = makerOf(b?.top[0]?.n || '');
-      const makerOK = !mr || !mc || tSim(mr, mc) >= 0.6;   // 読んだメーカー名と候補のメーカー名が違えば確定しない
+      const makerOK = BRANDLESS || !mr || !mc || tSim(mr, mc) >= 0.6;   // 銘柄を区別しない設定ならメーカー名は問わない
       if (b && b.top[0].sim >= 0.85 && (!b.top[1] || b.top[0].sim - b.top[1].sim >= 0.02 || b.top[1].n === b.top[0].n) && strengthOK(b.v, b.top[0].n) && makerOK) {
         Object.assign(cell, { value: b.top[0].n, yj: b.top[0].y || '', sim: b.top[0].sim, status: 'master', read: b.v });
         return cell;
@@ -1976,8 +1976,8 @@ function tblCSV() {
   return TBL.rows.map((r, ri) => r.flatMap((c, ci) => {
     const out = [c.value];
     if (TBL.addMaster && TBL.drugCol[ci]) {
-      if (ri === 0 && TBL.header) out.push('YJコード', '照合');
-      else out.push(c.yj || '', c.status === 'master' ? '一致' : c.value ? '要確認' : '');
+      if (ri === 0 && TBL.header) out.push(BRANDLESS ? 'YJコード(上9桁)' : 'YJコード', '照合');
+      else out.push(BRANDLESS ? (c.yj || '').slice(0, 9) : (c.yj || ''), c.status === 'master' ? '一致' : c.value ? '要確認' : '');
     }
     return out;
   }).map(q).join(',')).join('\r\n');
@@ -2785,8 +2785,19 @@ function searchSkeleton(sk, strengths, k = 3) {
 const MK = /[「｢(（]([^」｣)）]+)[」｣)）]?\s*$/;
 const makerOf = n => { const m = (n || '').normalize('NFKC').match(MK); return m ? normName(m[1]) : ''; };
 const baseOf = n => normName((n || '').normalize('NFKC').replace(MK, ''));
+// 院内では銘柄（メーカー）を区別しない：候補・照合・表示は「アムロジピン錠5mg」のように銘柄を除いた名前でまとめる
+const BRANDLESS = true;
+const brandless = n => String(n || '').replace(/\s*「[^」]*」\s*/g, '').replace(/\s*｢[^｣]*｣\s*/g, '').trim();
+// まとめる単位：銘柄を除いた名前＋YJコードの上9桁（成分・剤形・規格）。先発品など名前が違うものは別に残る
+const grpKeyOf = it => {
+  // 塩の表記ゆれ（Na／ナトリウム など）と空白・全角半角の違いもそろえる
+  let k = normalize(brandless(it.n)).replace(/\s+/g, '').toUpperCase();
+  for (const [w, ab] of [['ナトリウム', 'NA'], ['カリウム', 'K'], ['カルシウム', 'CA'], ['マグネシウム', 'MG']]) k = k.split(w).join(ab);
+  return k + '|' + String(it.y || '').slice(0, 9);
+};
 function buildIndex() {
   Master.mk = Master.items.map(it => makerOf(it.n));
+  Master.grp = Master.items.map(grpKeyOf);
   Master.base = Master.items.map((it, i) => Master.mk[i] ? baseOf(it.n) : '');
   Master.skel = Master.items.map(it => kanaSkeleton(it.n));
   Master.norm = Master.items.map(it => normName(it.n));
@@ -2875,7 +2886,7 @@ function searchMaster(q, k = 6, loose = false) {
       const tb = Master.base[id];
       const sb = 1 - lev(qBase, tb) / Math.max(qBase.length, tb.length, 1);
       const sm = 1 - lev(qMaker, cm) / Math.max(qMaker.length, cm.length, 1);
-      let s2 = 0.88 * sb + 0.12 * sm;
+      let s2 = BRANDLESS ? sb : 0.88 * sb + 0.12 * sm;
       for (const num of nums) if (!new RegExp(`(^|[^\\d.])${num.replace('.', '\\.')}(?![\\d.])`).test(tb)) s2 -= 0.15;
       sim = Math.max(loose ? sim - 0.1 : 0, s2);
     }
@@ -2884,17 +2895,17 @@ function searchMaster(q, k = 6, loose = false) {
   const out = [], names = new Set();
   for (const r of res) {
     const it = Master.items[r.id];
-    const key = it.n + '|' + (it.y || '');
+    const key = BRANDLESS ? Master.grp[r.id] : it.n + '|' + (it.y || '');
     if (names.has(key)) continue;
     names.add(key);
-    out.push({ n: it.n, y: it.y || '', sim: r.sim });
+    out.push({ n: BRANDLESS ? brandless(it.n) : it.n, y: it.y || '', sim: r.sim });
     if (out.length >= k) break;
   }
   return out;
 }
 function applyMaster(d, it, sim, gtin) {
   if (!d.rawName) d.rawName = d.name;
-  d.name = it.n;
+  d.name = BRANDLESS ? brandless(it.n) : it.n;
   d.yj = it.y || '';
   d.matchSim = sim;
   if (gtin) d.gs1 = gtin;
@@ -3097,10 +3108,16 @@ async function importMasterFiles(files, onMsg) {
   return { rowsDone, linked, unlinked: pending.length - linked, stored };
 }
 /* ---- 医療用医薬品供給状況（厚労省、毎営業日更新）: YJコード → [出荷対応, 出荷量, 更新日, 理由, 解除見込み] ---- */
-const Supply = { items: {}, meta: null, codes: { 1: '通常出荷', 2: '限定出荷（自社の事情）', 3: '限定出荷（他社品の影響）', 4: '限定出荷（その他）', 5: '供給停止' } };
+const Supply = { items: {}, byY9: null, meta: null, codes: { 1: '通常出荷', 2: '限定出荷（自社の事情）', 3: '限定出荷（他社品の影響）', 4: '限定出荷（その他）', 5: '供給停止' } };
 const QTY = { 'A+': '出荷量増加', A: '出荷量通常', B: '出荷量減少', C: '出荷停止', D: '薬価削除予定' };
 function supplyOfYJ(yj) {
-  const r = yj && Supply.items[yj];
+  let r = yj && Supply.items[yj];
+  if (BRANDLESS && yj && yj.length >= 9) {
+    // 銘柄を区別しないので、同じ成分・剤形・規格のどれかが出荷できていればそれを示す
+    const y9 = yj.slice(0, 9);
+    if (!Supply.byY9) { Supply.byY9 = {}; for (const [k, v] of Object.entries(Supply.items)) { const g = k.slice(0, 9); if (!Supply.byY9[g] || v[0] < Supply.byY9[g][0]) Supply.byY9[g] = v; } }
+    r = Supply.byY9[y9] || r;
+  }
   if (!r) return null;
   return { code: r[0], label: Supply.codes[r[0]] || '', qty: r[1], qtyLabel: QTY[r[1]] || '', date: r[2] || '', reason: r[3] || '', expect: r[4] || '' };
 }
@@ -3119,7 +3136,7 @@ async function pullSupply(meta) {
     if (!r.ok) return false;
     const data = await r.json();
     if (!data?.items) return false;
-    Supply.items = data.items; Supply.meta = data.meta || meta.supply;
+    Supply.items = data.items; Supply.byY9 = null; Supply.meta = data.meta || meta.supply;
     if (data.codes) Supply.codes = data.codes;
     await idbSet('supply', { items: Supply.items, meta: Supply.meta, codes: Supply.codes });
     return true;
@@ -3814,12 +3831,13 @@ function masterPrefix(q) {
   const ks = prefixKeys(t), k = ks[0];
   if (!Master.ready || k.length < (st ? 1 : 2)) return [];
   if (!PREFIX_KEYS || PREFIX_KEYS.length !== Master.items.length) PREFIX_KEYS = Master.items.map(it => prefixKey(it.n));
-  const out = [];
+  const out = [], seenG = new Set();
   for (let i = 0; i < PREFIX_KEYS.length; i++) {
     if (!ks.some(q => PREFIX_KEYS[i].startsWith(q))) continue;
     const it = Master.items[i];
     if (st && !strengthNums(it.n).includes(st)) continue;
-    out.push({ n: it.n, y: it.y || '', sim: 1, prefix: true });
+    if (BRANDLESS) { const g = Master.grp[i]; if (seenG.has(g)) continue; seenG.add(g); }
+    out.push({ n: BRANDLESS ? brandless(it.n) : it.n, y: it.y || '', sim: 1, prefix: true });
   }
   return out.sort((a, b) => a.n.localeCompare(b.n, 'ja'));
 }
@@ -4450,7 +4468,7 @@ const PANELS = {
         ${detail}
         <div class="block">
           <label class="pick" style="border:0;padding:0"><input type="checkbox" id="tblHeader" ${TBL.header ? 'checked' : ''} style="width:22px;height:22px"> <span>1行目は見出し</span></label>
-          <label class="pick" style="border:0;padding:0"><input type="checkbox" id="tblAddMaster" ${TBL.addMaster ? 'checked' : ''} style="width:22px;height:22px"> <span>薬品名の列の後ろに「YJコード」「照合」の列を付ける</span></label>
+          <label class="pick" style="border:0;padding:0"><input type="checkbox" id="tblAddMaster" ${TBL.addMaster ? 'checked' : ''} style="width:22px;height:22px"> <span>薬品名の列の後ろに「YJコード」「照合」の列を付ける${BRANDLESS ? '（銘柄を区別しないので、YJコードは上9桁）' : ''}</span></label>
           <div class="field"><label>薬品名の列<small>タップで切替</small></label><div class="chips">${Array.from({ length: nc }, (_, ci) => `<button class="chip${TBL.drugCol[ci] ? ' on' : ''}" data-act="tblDrugCol" data-c="${ci}">${ci + 1}列目${TBL.header && TBL.rows[0]?.[ci]?.value ? '：' + esc(TBL.rows[0][ci].value.slice(0, 8)) : ''}</button>`).join('')}</div></div>
           <div class="inline"><button class="btn primary" data-act="tblDownload">CSVを保存</button><button class="btn" data-act="tblCopy">CSVをコピー</button><button class="btn ghost danger" data-act="tblClear">消去</button></div>
           ${TBL.note ? `<p class="okline" role="status">${esc(TBL.note)}</p>` : ''}
@@ -4708,7 +4726,13 @@ function rvCands(d) {
   const base = d.cands?.length ? d.cands : searchMaster(d.rawName || d.name, 6, true);
   if (!d.showAll || !base[0]?.y) return base;
   const y9 = base[0].y.slice(0, 9), seen = new Set(base.map(c => c.n));
-  const more = Master.items.filter(it => it.y && it.y.slice(0, 9) === y9 && !seen.has(it.n)).map(it => ({ n: it.n, y: it.y, sim: 0 }));
+  const more = [];
+  for (const it of Master.items) {
+    if (!it.y || it.y.slice(0, 9) !== y9) continue;
+    const n = BRANDLESS ? brandless(it.n) : it.n;
+    if (seen.has(n)) continue;
+    seen.add(n); more.push({ n, y: it.y, sim: 0 });
+  }
   return [...base, ...more];
 }
 function usageBadgeD(d) {
@@ -5466,7 +5490,7 @@ idbGet('master').then(m => {
   }
   return idbGet('supply');
 }).then(s => {
-  if (s && s.items) { Supply.items = s.items; Supply.meta = s.meta; if (s.codes) Supply.codes = s.codes; }
+  if (s && s.items) { Supply.items = s.items; Supply.byY9 = null; Supply.meta = s.meta; if (s.codes) Supply.codes = s.codes; }
   return idbGet('formulary');
 }).then(f => {
   if (f && f.items) { Form.items = f.items; Form.meta = f.meta; applyLocalFixes(); buildFormIndex(); }
