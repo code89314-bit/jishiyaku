@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-04 20:52';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-04 20:55';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -4064,7 +4064,7 @@ function instrForm(doc) {
     </div>`;
 }
 
-// 採用薬の絞り込み：薬品名（棚表の表記・照合した名前）の前方一致。先頭の数字は規格。英字で始まれば棚番の前方一致も
+// 採用薬の絞り込み：薬品名（棚表の表記・照合した名前）・棚番（A-2、麻薬金庫、冷蔵庫など）の前方一致。先頭の数字は規格
 function formFilter(q) {
   q = normalize(String(q || '')).trim();
   const list = Form.items.filter(r => r.st !== 'excluded');
@@ -4073,7 +4073,7 @@ function formFilter(q) {
   const m = q.match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(?=[^\d.\s])/i);
   if (m) { st = String(+m[1]); t = q.slice(m[0].length); }
   const ks = prefixKeys(t), lk = prefixKey(q);
-  return list.filter(r => (/^[A-Za-z]/.test(q) && prefixKey(r.loc || '').startsWith(lk))
+  return list.filter(r => (r.loc && prefixKey(r.loc).startsWith(lk))
     || (ks.some(k => prefixKey(r.r).startsWith(k) || prefixKey(shortName(r.n || '')).startsWith(k)) && (!st || strengthNums(r.n || r.r).includes(st) || strengthNums(r.r).includes(st))));
 }
 function formRowsHTML(rows) {
