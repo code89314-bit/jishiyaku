@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-01 10:13';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-04 20:52';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -325,6 +325,9 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .tbl-legend { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 .tbl-legend .tc { padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); }
 .tbl-detail .chip small { display: block; margin: 2px 0 0; }
+.tag.loc { margin-left: 6px; background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.frow { padding: 8px 2px; border-top: 1px solid var(--line); }
+.frow:first-child { border-top: 0; }
 .tbl-cands { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
@@ -3163,7 +3166,7 @@ async function pullFormulary(meta) {
     if (!r.ok) return false;
     const data = await r.json();
     Form.items = data.items || []; Form.meta = data.meta || meta.formulary;
-    applyLocalFixes(); buildFormIndex();
+    applyLocalFixes(); buildFormIndex(); formLocCache.clear();
     await idbSet('formulary', { items: Form.items, meta: Form.meta });
     return true;
   } catch (e) { return false; }
@@ -3209,7 +3212,7 @@ function strengthWord(r) {
   return (sp && /\d/.test(sp) ? sp : (r.n.normalize('NFKC').match(/\d+(?:\.\d+)?\s*(?:mg|μg|g|%)/) || [''])[0]) + fw;
 }
 const supplyNote = y => { const s = supplyOfYJ(y); return s && s.code > 1 ? (s.code === 5 ? '※供給停止' : '※限定出荷') : ''; };
-const shortName = n => (n || '').replace(/^【般】/, '');
+const shortName = n => (BRANDLESS ? brandless(n || '') : (n || '')).replace(/^【般】/, '');
 
 // 代替薬の判定。戻り値 { kind, text, cands }
 function altFor(d) {
@@ -3223,6 +3226,8 @@ function altFor(d) {
   const l9 = Form.by[9].get(yj.slice(0, 9));
   if (l9) {
     if (l9.some(r => r.y === yj)) return { kind: 'same', text: '' };
+    // 銘柄を区別しない：成分・剤形・規格が同じで名前（銘柄を除く）も同じなら採用あり。先発品と後発品のように名前が違えば院内の名前を書く
+    if (BRANDLESS && l9.some(r => grpKeyOf({ n: r.n, y: r.y }).split('|')[0] === grpKeyOf({ n: d.name, y: yj }).split('|')[0])) return { kind: 'same', text: '' };
     const c = pick(l9, r => shortName(r.n));
     return { kind: 'brand', text: '院内採用：' + c[0].label, cands: c };
   }
@@ -3255,6 +3260,18 @@ function altFor(d) {
     return { kind: 'similar', text: chosen, cands: c, needChoice: !d.altChoice };
   }
   return { kind: 'none', text: '採用なし' };
+}
+// 採用薬の棚番・備考：YJコード（上9桁）か名前から
+const formLocCache = new Map();
+function formOf(name, yj) {
+  if (!Form.items.length) return null;
+  const k = (yj || '') + '|' + (name || '');
+  if (formLocCache.has(k)) return formLocCache.get(k);
+  let y = yj;
+  if (!y && name && Master.ready) { const t = searchMaster(name, 1, true)[0]; if (t && t.sim >= 0.85 && strengthOK(name, t.n)) y = t.y; }
+  const r = y ? (Form.by[9].get(y.slice(0, 9)) || [])[0] || null : null;
+  formLocCache.set(k, r);
+  return r;
 }
 function applyLocalFixes() {
   try { Form.fixes = JSON.parse(localStorage.getItem('jishiyaku.formfix') || '[]'); } catch (e) { Form.fixes = []; }
@@ -4047,6 +4064,24 @@ function instrForm(doc) {
     </div>`;
 }
 
+// 採用薬の絞り込み：薬品名（棚表の表記・照合した名前）の前方一致。先頭の数字は規格。英字で始まれば棚番の前方一致も
+function formFilter(q) {
+  q = normalize(String(q || '')).trim();
+  const list = Form.items.filter(r => r.st !== 'excluded');
+  if (!q) return list;
+  let st = '', t = q;
+  const m = q.match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(?=[^\d.\s])/i);
+  if (m) { st = String(+m[1]); t = q.slice(m[0].length); }
+  const ks = prefixKeys(t), lk = prefixKey(q);
+  return list.filter(r => (/^[A-Za-z]/.test(q) && prefixKey(r.loc || '').startsWith(lk))
+    || (ks.some(k => prefixKey(r.r).startsWith(k) || prefixKey(shortName(r.n || '')).startsWith(k)) && (!st || strengthNums(r.n || r.r).includes(st) || strengthNums(r.r).includes(st))));
+}
+function formRowsHTML(rows) {
+  return rows.slice(0, 400).map(r => `<div class="frow">
+      <div class="info"><div class="dname">${esc(r.n ? shortName(r.n) : r.r)}${r.loc ? `<span class="tag loc">${esc(r.loc)}</span>` : ''}</div>
+      <div class="sub">${r.n && shortName(r.n) !== r.r ? '棚表：' + esc(r.r) : ''}${r.memo ? `${r.n && shortName(r.n) !== r.r ? '・' : ''}${esc(r.memo)}` : ''}${['check', 'none'].includes(r.st) ? ' <span class="tag warn">' + (r.st === 'check' ? '要確認' : '該当なし') + '</span>' : ''}</div></div>
+    </div>`).join('') + (rows.length > 400 ? `<p class="muted">ほか ${rows.length - 400}件（絞り込んでください）</p>` : '');
+}
 const PANELS = {
   scan() {
     return {
@@ -4323,8 +4358,8 @@ const PANELS = {
         </div>` : ''}
         ${Form.meta ? `<div class="block">
           <h3>院内採用薬リスト</h3>
-          <p class="muted">${Number(Form.meta.count).toLocaleString()}品目（${esc(Form.meta.date || '')}）：確定 ${(Form.meta.counts?.ok || 0) + (Form.meta.counts?.fix || 0)}・銘柄あいまい ${Form.meta.counts?.amb || 0}・要確認 ${Form.meta.counts?.check || 0}・該当なし ${Form.meta.counts?.none || 0}</p>
-          <button class="btn" data-act="formReview">要確認の行を直す</button>
+          <p class="muted">${Number(Form.meta.count).toLocaleString()}品目（${esc(Form.meta.date || '')}）：確定 ${(Form.meta.counts?.ok || 0) + (Form.meta.counts?.fix || 0)}・要確認 ${Form.meta.counts?.check || 0}・該当なし ${Form.meta.counts?.none || 0}</p>
+          <div class="inline"><button class="btn primary" data-act="formList">採用薬の一覧・棚番</button><button class="btn" data-act="formReview">要確認の行を直す</button></div>
         </div>` : ''}
         <div class="block filepick">
           <h3>ファイルを取り込む（この端末だけに追加）</h3>
@@ -4371,6 +4406,17 @@ const PANELS = {
     };
   },
 
+  formList() {
+    const p = ui.panel, q = (p.q || '').trim(), rows = formFilter(q);
+    return {
+      title: '院内採用薬（棚番）',
+      left: `<button class="btn ghost" data-act="masterPanel">‹ 戻る</button>`,
+      body: `
+        <div class="field"><label for="formQ">薬品名・棚番で探す（前方一致）</label><input id="formQ" value="${esc(q)}" placeholder="例：アムロ、5アムロ、A-2" autocomplete="off"></div>
+        <p class="muted">${rows.length.toLocaleString()}品目</p>
+        <div class="flist" id="formRows">${formRowsHTML(rows)}</div>`
+    };
+  },
   formReview() {
     const rows = Form.items.filter(r => ['check', 'none', 'amb'].includes(r.st));
     const csv = Form.fixes.map(f => `${f.r.includes(',') ? '"' + f.r + '"' : f.r},${f.y},${f.n || ''}`).join('\n');
@@ -4385,6 +4431,7 @@ const PANELS = {
         ${rows.length ? rows.map((r, i) => `<div class="block">
           <h3>${esc(r.r)}<small>${{ check: '要確認', none: '該当なし', amb: '銘柄があいまい' }[r.st]}</small></h3>
           <div class="cands">${(r.c || []).map((c, k) => `<button class="cand" data-act="formFix" data-i="${Form.items.indexOf(r)}" data-k="${k}"><span class="cn">${esc(c[0])}</span><span class="cs">YJ ${esc(c[1])}・一致度 ${c[2]}</span></button>`).join('')}</div>
+          <div class="field" style="margin-top:6px"><label>ほかの薬を探す（前方一致・先頭の数字は規格）</label><input class="formFixQ" data-i="${Form.items.indexOf(r)}" placeholder="例：7.5トルバ" autocomplete="off"><div class="cands" id="formFixC${Form.items.indexOf(r)}"></div></div>
           <button class="btn" data-act="formExclude" data-i="${Form.items.indexOf(r)}">薬ではない行として除外</button>
         </div>`).join('') : '<p class="okline">要確認の行はありません。</p>'}`
     };
@@ -4498,7 +4545,7 @@ const PANELS = {
         ${empties.length ? `<p class="warnline">空けるマス：${empties.join('、')}</p>` : ''}
         ${b.slots.map(sl => `<div class="rc-slot">
             <div class="rc-sh"><b>${rcLabel(sl.t)}</b><span>${sl.cells.length}マス</span><span class="rc-pc">1マスに ${sl.pieces}錠</span></div>
-            ${sl.items.map(x => `<div class="rc-it"><span class="rp-no">${circled(x.d.no)}</span><span>${esc(nm(x.d))}</span><b>${amt(x.a.amt, x.a.unit)}</b></div>`).join('')}
+            ${sl.items.map(x => { const f = formOf(x.d.name); return `<div class="rc-it"><span class="rp-no">${circled(x.d.no)}</span><span>${esc(nm(x.d))}${f?.loc ? `<span class="tag loc">${esc(f.loc)}</span>` : ''}</span><b>${amt(x.a.amt, x.a.unit)}</b></div>`; }).join('')}
           </div>`).join('')}
         <table class="rc-grid"><caption>分包機のマス（上の段から、左から右へ）</caption>
           <tr><th></th>${b.dates.map(iso => `<th>${dMD(iso)}</th>`).join('')}</tr>
@@ -5054,11 +5101,18 @@ const actions = {
 
   // 採用薬リストの修正
   formReview: () => openPanel({ type: 'formReview' }),
+  formList: () => openPanel({ type: 'formList', q: '' }),
+  formFixPick: el => {
+    const r = Form.items[+el.dataset.i], c = (Form.fixCands || [])[+el.dataset.k]; if (!r || !c) return;
+    Form.fixes = Form.fixes.filter(f => f.r !== r.r).concat([{ r: r.r, y: c.y, n: c.n }]);
+    try { localStorage.setItem('jishiyaku.formfix', JSON.stringify(Form.fixes)); } catch (e) {}
+    r.y = c.y; r.n = c.n; r.st = 'fix'; buildFormIndex(); formLocCache.clear(); renderPanel();
+  },
   formFix: el => {
     const r = Form.items[+el.dataset.i], c = r?.c?.[+el.dataset.k]; if (!c) return;
     Form.fixes = Form.fixes.filter(f => f.r !== r.r).concat([{ r: r.r, y: c[1], n: c[0] }]);
     try { localStorage.setItem('jishiyaku.formfix', JSON.stringify(Form.fixes)); } catch (e) {}
-    r.y = c[1]; r.n = c[0]; r.st = 'fix'; buildFormIndex(); renderPanel();
+    r.y = c[1]; r.n = c[0]; r.st = 'fix'; buildFormIndex(); formLocCache.clear(); renderPanel();
   },
   formExclude: el => {
     const r = Form.items[+el.dataset.i]; if (!r) return;
@@ -5348,6 +5402,20 @@ document.addEventListener('input', e => {
   if (t.id === 'search') { ui.search = t.value; renderMain(); return; }
   if (t.id === 'scanText') { ui.scanText = t.value; save(); return; }
   if (t.id === 'rptText') { RPT.text = t.value; rptSave(); return; }
+  if (t.id === 'formQ' && ui.panel?.type === 'formList') {
+    ui.panel.q = t.value;
+    const rows = formFilter(t.value);
+    const box = $('#formRows'); if (box) box.innerHTML = formRowsHTML(rows);
+    const n = box?.previousElementSibling; if (n) n.textContent = rows.length.toLocaleString() + '品目';
+    return;
+  }
+  if (t.classList?.contains('formFixQ')) {
+    const i = +t.dataset.i, list = masterPrefix(t.value).slice(0, 60);
+    Form.fixCands = list;
+    const box = $('#formFixC' + i);
+    if (box) box.innerHTML = list.map((c, k) => `<button class="cand" data-act="formFixPick" data-i="${i}" data-k="${k}"><span class="cn">${esc(c.n)}</span><span class="cs">YJ ${esc((c.y || '').slice(0, 9))}</span></button>`).join('') || (t.value.trim().length >= 2 ? '<p class="muted">見つかりません</p>' : '');
+    return;
+  }
   if (t.id === 'tblEdit' && TBL.sel) {
     TBL.typed = t.value;
     const box = $('#tblCands'), [r, c] = TBL.sel;

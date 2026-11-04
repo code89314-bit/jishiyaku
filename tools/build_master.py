@@ -457,6 +457,32 @@ def nkey(s):
     return s.upper()
 
 
+SALT_WORDS = re.compile(r'(ベシル酸塩|塩酸塩|硫酸塩|マレイン酸塩|酒石酸塩|メシル酸塩|臭化水素酸塩|フマル酸塩|コハク酸塩|リン酸塩|酢酸塩|水和物|酢酸エステル|ニコチン酸エステル)')
+
+
+def brandless(n):
+    """銘柄（「メーカー」）を除いた名前"""
+    return re.sub(r'\s*[「｢][^」｣]*[」｣]\s*', '', n or '').strip()
+
+
+def fkey(s):
+    """棚表と薬価基準の書き方の違いをそろえたキー"""
+    s = unicodedata.normalize('NFKC', s or '').strip()
+    s = re.sub(r'[(（][^()（）\d]*[)）]\s*$', '', s)          # 末尾の（コーヒー）（黒糖）（規格2種あり）など、数字のない注記
+    s = re.sub(r'^ツムラ\s*\d+\s*', 'ツムラ', s)               # ツムラ1葛根湯 → ツムラ葛根湯
+    s = s.replace('(医療用)', '').replace('医療用', '')
+    s = re.sub(r'[〔［\[]([^〕］\]]*)[〕］\]]', r' \1 ', s)                     # 〔含嗽用〕〔5%〕 の括弧を外す
+    s = re.sub(r'(含嗽用|眼・耳科用|眼耳科用|点眼・点鼻用|点眼点鼻用)', '', s)       # 用途の語は位置がまちまちなので外す
+    s = s.replace('膣', '腟').replace('寫', '瀉').replace('薏苡仁', 'よく苡仁').replace('逍遥', '逍遙').replace('エアゾル', 'エアゾール')
+    s = re.sub(r'^(塩酸|硫酸)([ァ-ヴー]+)', lambda m: m.group(2) + m.group(1) + '塩', s)   # 塩酸モルヒネ → モルヒネ塩酸塩
+    return nkey(s)
+
+
+def fkey_nosalt(s):
+    """塩（塩酸塩など）の有無も無視したキー：アマンタジン錠50mg ＝ アマンタジン塩酸塩錠50mg"""
+    return SALT_WORDS.sub('', fkey(s))
+
+
 def formulary_rows(tables):
     """棚表から「薬品名（＋規格の列）」と、あればコードを取り出す"""
     out = []
@@ -474,14 +500,25 @@ def formulary_rows(tables):
             continue
         spec_cols = [i for i in range(width) if i != name_col and ratio(i, lambda v: bool(STRENGTH_COL.match(v))) > 0.2]
         code_col = next((i for i in range(width) if ratio(i, lambda v: bool(YJ_RE.fullmatch(v.upper()))) > 0.2), -1)
-        print(f'  棚表: {tname}  名前={name_col} 規格={spec_cols} コード={code_col}')
+        # 見出しの行から「備考」の列を、名前の右にある短い値の列を棚番（棚・段・位置）とする
+        head = next((r for r in rows[:5] if any(re.search(r'薬品名|品名', c or '') for c in r)), [])
+        memo_col = next((i for i, c in enumerate(head) if re.search(r'備考|メモ|コメント|注意', c or '')), -1)
+        used = {name_col, code_col, memo_col, *spec_cols}
+        loc_cols = [i for i in range(width) if i not in used and i > name_col
+                    and ratio(i, lambda v: len(v.strip()) <= 8) > 0.2 and ratio(i, lambda v: len(v.strip()) > 8) < 0.05]
+        print(f'  棚表: {tname}  名前={name_col} 規格={spec_cols} コード={code_col} 棚番={loc_cols} 備考={memo_col}')
         for r in rows:
             g = lambda i: r[i] if 0 <= i < len(r) else ''
             name = g(name_col)
             if not name or not re.search(r'[ァ-ヴｦ-ﾟA-Za-z一-龥]{2,}', name) or re.search(r'薬品名|品名|医薬品名', name):
                 continue
             spec = ' '.join(g(i) for i in spec_cols if g(i) and g(i) not in name)
-            out.append({'r': (name + (' ' + spec if spec else '')).strip(), 'code': g(code_col).upper() if code_col >= 0 else ''})
+            loc = '-'.join(unicodedata.normalize('NFKC', g(i)).strip() for i in loc_cols if g(i).strip())
+            memo = unicodedata.normalize('NFKC', g(memo_col)).strip() if memo_col >= 0 else ''
+            rec = {'r': (name + (' ' + spec if spec else '')).strip(), 'code': g(code_col).upper() if code_col >= 0 else ''}
+            if loc: rec['loc'] = loc
+            if memo: rec['memo'] = memo
+            out.append(rec)
     return out
 
 
@@ -500,7 +537,19 @@ def build_formulary(items):
         for r in csv.reader(io.StringIO(decode(FIXES.read_bytes()))):
             if len(r) >= 2 and r[0].strip() and not r[0].startswith('#') and r[0].strip() != '棚表の表記':
                 fixes[nkey(r[0])] = r[1].strip().upper()
-    keys = [nkey(it['n']) for it in items]
+    # 院内では銘柄を区別しない：銘柄を除いた名前とYJ上9桁でまとめた品目と照合する
+    groups, gidx = [], {}
+    for it in items:
+        bn = brandless(it['n'])
+        g = (fkey(bn), (it.get('y') or '')[:9])
+        if g not in gidx:
+            gidx[g] = len(groups)
+            groups.append({'n': bn, 'y': it.get('y', '')})
+    items = groups
+    keys = [fkey(it['n']) for it in items]
+    nosalt = {}
+    for i, it in enumerate(items):
+        nosalt.setdefault(fkey_nosalt(it['n']), []).append(i)
     by_y = {}
     for it in items:
         if it.get('y'):
@@ -508,18 +557,40 @@ def build_formulary(items):
     out, seen = [], set()
     for row in rows:
         raw = row['r']
-        k = nkey(raw)
+        k = fkey(raw)
         if not k or k in seen:
             continue
         seen.add(k)
         rec = {'r': raw}
-        fix = fixes.get(k)
+        for key in ('loc', 'memo'):
+            if row.get(key):
+                rec[key] = row[key]
+        fix = fixes.get(nkey(raw)) or fixes.get(k)
         if fix == '除外':
             continue
         code = fix or (row['code'] if YJ_RE.fullmatch(row['code']) else '')
         if code:
             it = by_y.get(code)
             rec.update(y=code, n=it['n'] if it else raw, s=100, st='fix' if fix else 'ok')
+            out.append(rec)
+            continue
+        # 名前が（書き方の違いをそろえて）完全に一致、または塩の有無だけの違いで一致すれば確定
+        exact = [i for i, kk in enumerate(keys) if kk == k] or nosalt.get(fkey_nosalt(raw), [])
+        if not exact:
+            # 表の名前の末尾の内容量（25g・3g・50mL など）を外して、もう一度
+            k2 = re.sub(r'\d+(?:\.\d+)?(G|ML|枚|本|個|CM2|包)$', '', k)
+            if k2 != k and len(k2) >= 4:
+                exact = [i for i, kk in enumerate(keys) if kk == k2]
+            # 表の名前で始まるマスターの品目（包装・噴霧数・分包量の違い）がすべて同じ成分・規格なら、それ
+            if not exact:
+                for kk_ in (k, k2):
+                    pre = [i for i, kk in enumerate(keys) if len(kk_) >= 5 and kk.startswith(kk_)]
+                    if pre and len({(items[i].get('y') or '')[:9] for i in pre}) == 1:
+                        exact = pre
+                        break
+        if exact and len({(items[i].get('y') or '')[:9] for i in exact}) == 1:
+            it = items[exact[0]]
+            rec.update(y=it.get('y', ''), n=it['n'], s=100, st='ok')
             out.append(rec)
             continue
         nums = NUM_RE.findall(k)
@@ -548,10 +619,10 @@ def build_formulary(items):
         top_s, top = uniq[0]
         second = uniq[1] if len(uniq) > 1 else None
         same9 = second and top.get('y') and second[1].get('y') and top['y'][:9] == second[1]['y'][:9]
-        if top_s >= 88 and (not second or top_s - second[0] >= 4):
-            st = 'ok'
+        if top_s >= 88 and (not second or top_s - second[0] >= 4 or same9):
+            st = 'ok'                               # 2位が同じ成分・剤形・規格なら、銘柄を区別しないので確定
         elif top_s >= 85 and same9:
-            st = 'amb'                              # 銘柄（メーカー）だけ曖昧。成分・剤形・規格は確定
+            st = 'ok'
         elif top_s >= 60:
             st = 'check'
         else:
