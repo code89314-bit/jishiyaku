@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 06:46';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 07:02';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -333,6 +333,13 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
 .warnline { margin: 0; color: var(--warn); font-weight: 700; }
+.path-al { display: grid; gap: 6px; margin: 6px 0; }
+.path-a { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); font-size: 13.5px; line-height: 1.45; }
+.path-a b { flex: 0 0 auto; font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--warn-soft); color: var(--warn); }
+.path-a small { margin-left: 6px; font-size: 11px; color: var(--muted); }
+.path-a.ng { border-color: var(--warn); }
+.path-a.ng b { background: var(--warn); color: var(--surface); }
+.path-a.note b { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
 .cands { display: grid; gap: 6px; }
 .cand {
   display: grid; gap: 2px; text-align: left; width: 100%; padding: 10px 12px; min-height: 48px;
@@ -1718,7 +1725,7 @@ async function tblOcr(src, onStatus = () => {}) {
   return { rows, grid };
 }
 
-try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a), searchMaster: (...a) => searchMaster(...a), review: t => openPanel({ type: "review", review: makeReview(t) }), norm: (q, l) => l ? normSpoken(q) : normName(q) }; } catch (e) {}
+try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a), searchMaster: (...a) => searchMaster(...a), report: () => actions.report(), state: () => state, review: t => openPanel({ type: "review", review: makeReview(t) }), norm: (q, l) => l ? normSpoken(q) : normName(q) }; } catch (e) {}
 // 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
 const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
 async function ndlCached() {
@@ -1860,7 +1867,8 @@ function ocrImage(src) {
 
 /* ---- 持参薬レポートの取り込み：画像 → 文字（端末内OCR、有効ならLLMで書き起こし）→ parseReport ---- */
 const RPT = { text: '', doc: null };
-try { RPT.text = localStorage.getItem('jishiyaku.rpt') || ''; } catch (e) {}
+try { RPT.text = localStorage.getItem('jishiyaku.rpt') || ''; RPT.path = localStorage.getItem('jishiyaku.rptpath') || ''; } catch (e) {}
+const rptSavePath = () => { try { localStorage.setItem('jishiyaku.rptpath', RPT.path || ''); } catch (e) {} };
 const rptSave = () => { try { localStorage.setItem('jishiyaku.rpt', RPT.text); } catch (e) {} };
 RPT.instr = null;
 // レポート本文を読み直し、指示も取り出す
@@ -3717,7 +3725,7 @@ function parseInstr(lines) {
 const instrNums = nums => numberRange(nums, 4);
 function instrText(ins) {
   const head = [ins.manage, ins.contAll ? '全て継続' : ins.cont.length ? instrNums(ins.cont) + '継続' : '', ...ins.acts.map(a => instrNums(a.nums) + a.verb)].filter(Boolean).join('　');
-  return ['＊＊＊＊＊＊＊＊＊＊＊＊', `【${ins.date || '?/?'}指示】`, head, '',
+  return ['＊＊＊＊＊＊＊＊', `【${ins.date || '?/?'}指示】`, head, '',
     ...ins.preps.map(p => `※${instrNums(p.nums)}:${p.until || '?/?'}${p.time}まで${p.remain ? '（残薬あり）' : ''}`),
     ...ins.extra].join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -4056,6 +4064,101 @@ function rptShort(d) {
   const st = (n.match(/\d+(?:\.\d+)?(?:mg|μg|g|%)/) || [''])[0];
   return head + (st ? ' ' + st : '');
 }
+
+/* ---- パス入院：パスで処方される薬と、持参薬の重複・併用の確認 ----
+   ing：同じ成分（YJコード先頭7桁）／sim：類似薬（YJコードの先頭＝薬効分類）／simName：類似薬を名前で決めるとき
+   判断は薬剤師が行う。ここでは気づくための印を出すだけ */
+const YJ_ANTITHROMBO = ['3332', '3339', '3399'];                       // ワルファリン・DOAC・抗血小板薬
+const YJ_CHELATE = ['2344', '2343', '2349', '2329008', '2190024', '2190029', '2190033', '2190036', '3211', '3222'];   // Mg・Al・Ca・Fe・ランタンなど
+const YJ_NSAID = ['1143', '1144', '1145', '1146', '1147', '1148', '1149'];   // アセトアミノフェン（1141）以外の解熱鎮痛消炎剤
+const PATH_DRUGS = {
+  'TUL': [
+    { n: 'コスパノン', ing: ['1249007'], sim: ['124'] },
+    { n: 'テプレノン', ing: ['2329012'], simName: /レバミピド|ムコスタ|スクラルファート|アルサルミン|エカベト|ガストローム|ポラプレジンク|プロマック|マーズレン|アズレン|セルベックス/ },
+    { n: 'カロナール', ing: ['1141007'], sim: ['114', '1180'], tag: 'apap' },
+    { n: 'ラリキシン', ing: ['6132002'], sim: ['61', '624'] }],
+  '前立腺生検': [
+    { n: 'グレースビット', ing: ['6241018'], sim: ['624', '61'], tag: 'quin' },
+    { n: 'アドナ', ing: ['3321002'], sim: ['332'] }],
+  'CAT': [
+    { n: 'ダイアモックス', ing: ['2134001', '2134002'], sim: ['213'] },
+    { n: 'アスパラK', ing: ['3229005'], sim: ['3229'], tag: 'K' },
+    { n: 'ロキソプロフェン', ing: ['1149019'], sim: ['114', '1180'], tag: 'nsaid' },
+    { n: 'ラリキシン', ing: ['6132002'], sim: ['61', '624'] },
+    { n: 'ジクロフェナクNa', ing: ['1147002', '1147700'], sim: ['114', '1180'], tag: 'nsaid diclo' },
+    { n: 'ジアゼパム', ing: ['1124017'], sim: ['112'] }],
+  'HoLEP': [
+    { n: 'レボフロキサシン', ing: ['6241013'], sim: ['624', '61'], tag: 'quin' }]
+};
+const PATH_SURGERY = new Set(['TUL', '前立腺生検', 'HoLEP']);   // 抗血栓薬の休薬を確認するパス
+// 併用の確認：パスの薬の tag ごとに、持参薬の YJ（先頭一致）と内容
+const PATH_IX = [
+  { tag: 'K', yj: ['2149045', '2149049'], lv: '禁忌', msg: '高カリウム血症（カリウム製剤と併用禁忌）' },
+  { tag: 'K', yj: ['2133001', '2133002'], lv: '注意', msg: 'カリウム保持性利尿薬：高カリウム血症に注意' },
+  { tag: 'quin', yj: YJ_CHELATE, lv: '時点', msg: 'Mg・Al・Ca・鉄などでキノロンの吸収が落ちる：服用時点をずらす' },
+  { tag: 'quin', yj: YJ_NSAID, lv: '注意', msg: 'NSAIDsとキノロン：痙攣に注意' },
+  { tag: 'quin', yj: ['3332'], lv: '注意', msg: 'ワルファリンの作用増強（INRに注意）' },
+  { tag: 'nsaid', yj: YJ_ANTITHROMBO, lv: '注意', msg: '抗血栓薬とNSAIDs：出血に注意' },
+  { tag: 'nsaid', yj: ['624'], lv: '注意', msg: 'キノロンとNSAIDs：痙攣に注意' },
+  { tag: 'nsaid', yj: ['1179017'], lv: '注意', msg: 'リチウムの血中濃度上昇' },
+  { tag: 'diclo', yj: ['2133002'], lv: '禁忌', msg: 'トリアムテレンとジクロフェナク：併用禁忌（急性腎障害）' },
+  { tag: 'apap', yj: ['3332'], lv: '注意', msg: 'ワルファリンの作用増強（INRに注意）' }
+];
+const yjHas = (yj, list) => !!yj && list.some(p => yj.startsWith(p));
+// レポートの薬（番号・名前）にYJコードを付ける：今の患者の薬と同じ名前ならそのYJ、なければマスターで引く
+const pathYJCache = new Map();
+function pathResolve(d) {
+  const nm = (d.name || '').trim();
+  if (!nm) return '';
+  if (pathYJCache.has(nm)) return pathYJCache.get(nm);
+  let yj = '';
+  for (const c of state.clinics) for (const x of c.drugs) if (!yj && x.yj && displayName(x) === nm) yj = x.yj;
+  if (!yj && Master.ready) { const t = searchMaster(nm, 1, true)[0]; if (t && t.sim >= 0.75) yj = t.y; }
+  if (yj || Master.ready) pathYJCache.set(nm, yj);
+  return yj;
+}
+function pathAlerts(path, drugs) {
+  const list = PATH_DRUGS[path];
+  if (!list) return [];
+  const out = [];
+  for (const d of drugs) {
+    if (d.ext) continue;
+    const yj = pathResolve(d);
+    if (!yj) continue;
+    const name = d.name || '';
+    for (const pd of list) {
+      if (yjHas(yj, pd.ing)) out.push({ no: d.no, lv: '重複', pd: pd.n, msg: 'と同じ成分' });
+      else if (yjHas(yj, pd.sim || []) || (pd.simName && pd.simName.test(name))) out.push({ no: d.no, lv: '類似', pd: pd.n, msg: 'と類似薬' });
+      for (const ix of PATH_IX) if ((pd.tag || '').split(' ').includes(ix.tag) && yjHas(yj, ix.yj)) out.push({ no: d.no, lv: ix.lv, pd: pd.n, msg: '：' + ix.msg });
+    }
+    if (PATH_SURGERY.has(path) && yjHas(yj, YJ_ANTITHROMBO)) out.push({ no: d.no, lv: '確認', pd: '', msg: '抗血栓薬：休薬・継続の指示を確認' });
+  }
+  // 同じ薬・同じ内容は1つにまとめ、パスの薬の名前を並べる。同じ成分があれば、その薬の「類似」は出さない
+  const dup = new Set(out.filter(a => a.lv === '重複').map(a => a.no)), g = new Map();
+  for (const a of out) {
+    if (a.lv === '類似' && dup.has(a.no)) continue;
+    const k = a.no + '|' + a.lv + '|' + a.msg;
+    if (!g.has(k)) g.set(k, { ...a, pds: [] });
+    if (a.pd && !g.get(k).pds.includes(a.pd)) g.get(k).pds.push(a.pd);
+  }
+  const rank = { '禁忌': 0, '重複': 1, '時点': 2, '注意': 3, '確認': 4, '類似': 5 };
+  return [...g.values()].map(a => ({ no: a.no, lv: a.lv, msg: (a.pds.length ? 'パスの' + a.pds.join('・') : '') + a.msg }))
+    .sort((a, b) => rank[a.lv] - rank[b.lv] || a.no - b.no);
+}
+const PATH_LV = { '禁忌': 'ng', '重複': 'ng', '時点': 'warn', '注意': 'warn', '類似': 'note', '確認': 'warn' };
+function pathBlock(doc, contSet) {
+  const path = RPT.path || '';
+  const seg = [['', 'パスなし'], ...Object.keys(PATH_DRUGS).map(k => [k, k])].map(([v, l]) => `<button class="seg${path === v ? ' on' : ''}" data-act="insPath" data-v="${esc(v)}" style="padding:0 10px">${esc(l)}</button>`).join('');
+  let body = '';
+  if (path) {
+    const al = pathAlerts(path, doc.drugs), byNo = new Map(doc.drugs.map(d => [d.no, d]));
+    body = `<p class="muted" style="margin:6px 0">パスの処方：${PATH_DRUGS[path].map(x => esc(x.n)).join('、')}</p>`
+      + (al.length ? `<div class="path-al">${al.map(a => { const d = byNo.get(a.no); return `<div class="path-a ${PATH_LV[a.lv] || 'warn'}"><b>${esc(a.lv)}</b><span>${circled(a.no)} ${esc(rptShort(d))}${contSet.has(a.no) ? '<small>継続にしています</small>' : ''}<br>${esc(a.msg)}</span></div>`; }).join('')}</div>`
+        : '<p class="okline" style="margin:4px 0">パスの薬との重複・併用で気になるものは見つかりませんでした。</p>')
+      + '<p class="muted" style="margin:4px 0">判定は名前・YJコードからの目安です。最終の判断は薬剤師が行ってください。</p>';
+  }
+  return `<div class="field"><label>パス入院</label><div class="sizes">${seg}</div>${body}</div>`;
+}
 // 指示の入力フォーム（番号は薬品名つきのボタンで選ぶ。丸数字を読まなくてよい）
 function instrForm(doc) {
   const ins = RPT.instr;
@@ -4074,6 +4177,7 @@ function instrForm(doc) {
       <h3>指示<small>区切り（＊＊＊）より下・ボタンで修正できます</small></h3>
       <div class="field"><label for="insDate">指示日</label><input type="date" id="insDate" value="${mdToISO(ins.date)}"></div>
       <div class="field"><label>管理</label><div class="sizes">${seg('insManage', [['病棟管理', '病棟管理'], ['自己管理', '自己管理']], ins.manage)}</div></div>
+      ${pathBlock(doc, contSet)}
       <div class="field"><label>継続する薬<small>${contSet.size}品目</small></label>
         <div class="chips">${doc.drugs.map(d => chip('insCont', d, contSet.has(d.no))).join('')}</div>
         <div class="inline" style="margin-top:6px"><button class="btn ghost" data-act="insContAll">すべて</button><button class="btn ghost" data-act="insContReg">定時の内服だけ</button><button class="btn ghost" data-act="insContNone">クリア</button></div>
@@ -4489,13 +4593,18 @@ const PANELS = {
         foot: `<button class="btn primary" data-act="reportCopy">コピー</button>`
       };
     }
+    // 指示を付けたあとは、指示のフォーム（持参薬レポートを読む画面と共通）と本文をつなぐ
+    if (p.linked) { if (RPT.text) p.text = RPT.text; else p.linked = false; }
     return {
       title: '鑑別レポート',
       left: `<button class="btn ghost" data-act="close">閉じる</button>`,
       body: `
         <p class="muted">医療機関ごと・用法ごと（分の少ない順、食前→食後）に並べています。ここで直接修正してから保存・コピーできます。</p>
-        <textarea class="scanbox" id="reportText" style="min-height:55vh;border-style:solid" spellcheck="false">${esc(p.text)}</textarea>
+        <textarea class="scanbox" id="reportText" style="min-height:${p.linked ? 40 : 55}vh;border-style:solid" spellcheck="false">${esc(p.text)}</textarea>
         <p class="okline" id="copyNote" role="status">${esc(p.msg || '')}</p>
+        ${p.linked && RPT.doc ? instrForm(RPT.doc) : `<div class="block"><h3>指示<small>レポートの最後に「＊＊＊」で区切って入れます</small></h3>
+          <p class="muted">指示日・病棟管理／自己管理・継続する薬を選ぶと、レポートの最後に書き足します。パス入院の確認もここで行います。</p>
+          <button class="btn primary" data-act="reportIns">指示を入れる</button></div>`}
         ${ui.reports.length ? `<div class="block">
           <h3>この患者の保存済みレポート<small>タップで表示</small></h3>
           <div class="cands">${ui.reports.map((r, i) => `<button class="cand" data-act="reportLoad" data-i="${i}">
@@ -5118,7 +5227,19 @@ const actions = {
 
   // レポート
   report: () => openPanel({ type: 'report', text: buildReport() }),
-  reportRebuild: () => { ui.panel.text = buildReport(); renderPanel(true); },
+  reportRebuild: () => {
+    const p = ui.panel, ins = p.linked ? RPT.instr : null;
+    p.text = buildReport();
+    if (p.linked) { RPT.text = p.text; if (ins) { RPT.instr = ins; rptApplyInstr(); return; } rptReparse(); }
+    renderPanel(true);
+  },
+  reportIns: () => {
+    const p = ui.panel, ta = $('#reportText');
+    if (ta) p.text = ta.value;
+    if (RPT.text !== p.text) { RPT.path = ''; rptSavePath(); }
+    RPT.text = p.text; pathYJCache.clear(); rptReparse(); p.linked = true;
+    if (!RPT.instr) actions.insNew(); else renderPanel();
+  },
   reportCopy: () => {
     const ta = $('#reportText'), note = $('#copyNote');
     const text = ta ? ta.value : ui.panel.text;
@@ -5316,6 +5437,7 @@ const actions = {
     rptApplyInstr();
   },
   insManage: el => { RPT.instr.manage = el.dataset.v; rptApplyInstr(); },
+  insPath: el => { RPT.path = el.dataset.v; rptSavePath(); renderPanel(); },
   insCont: el => {
     const ins = RPT.instr, n = +el.dataset.n;
     if (ins.contAll) { ins.cont = RPT.doc.drugs.map(d => d.no); ins.contAll = false; }
@@ -5346,7 +5468,7 @@ const actions = {
     catch (e) { if (m) m.textContent = 'コピーできませんでした。上の文を長押しして選択してください'; }
   },
   rptParse: () => { const t = $('#rptText'); if (t) RPT.text = t.value; rptReparse(); renderPanel(); },
-  rptClear: () => { RPT.text = ''; RPT.doc = null; RPT.instr = null; rptSave(); ocrStatus(''); renderPanel(); },
+  rptClear: () => { RPT.text = ''; RPT.doc = null; RPT.instr = null; RPT.path = ''; rptSavePath(); rptSave(); ocrStatus(''); renderPanel(); },
   rptFromCurrent: () => { RPT.text = buildReport(); rptReparse(); renderPanel(); },
   ocrPanel: () => { openPanel({ type: 'ocr' }); ndlCached().then(v => { if (ui.panel?.type === 'ocr') { ui.panel.cached = v; renderPanel(); } }); },
   ocrSet: el => { try { localStorage.setItem('jishiyaku.ocr', el.dataset.v); } catch (e) {} renderPanel(); },
@@ -5474,7 +5596,7 @@ document.addEventListener('input', e => {
     if (box) { box.innerHTML = tblCandHTML(tblCandList(TBL.rows[r][c], t.value), t.value); box.scrollTop = 0; }
     return;
   }
-  if (t.id === 'reportText') { ui.panel.text = t.value; return; }
+  if (t.id === 'reportText') { ui.panel.text = t.value; if (ui.panel.linked) { RPT.text = t.value; rptSave(); } return; }
   if (t.id === 'sLabel') { ui.label = t.value; save(); renderMain(); return; }
   if (t.dataset.amt && ui.panel?.type === 'heat') {
     const r = findDrug(ui.panel.id);
@@ -5544,6 +5666,7 @@ document.addEventListener('change', async e => {
     if (to !== ci) { const [d] = cs[ci].drugs.splice(di, 1); cs[to].drugs.push(d); if (!cs[ci].drugs.length) cs.splice(ci, 1); renderPanel(); }
     return;
   }
+  if (e.target.id === 'reportText' && ui.panel?.type === 'report' && ui.panel.linked) { RPT.text = e.target.value; ui.panel.text = e.target.value; pathYJCache.clear(); rptReparse(); renderPanel(); return; }
   if (e.target.id === 'llmOn') { const c = llmCfg(); c.on = e.target.checked; setLlmCfg(c); return; }
   if (e.target.id === 'rcStartDate' && e.target.value) { RCP.start = [e.target.value, RCP.start[1]]; rcpSave(); renderPanel(); return; }
   if (e.target.id === 'rcDis') { RCP.discharge = e.target.value; renderPanel(); return; }
