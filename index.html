@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 06:33';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 06:35';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -1711,7 +1711,7 @@ async function tblOcr(src, onStatus = () => {}) {
   return { rows, grid };
 }
 
-try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length }; } catch (e) {}
+try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a) }; } catch (e) {}
 // 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
 const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
 async function ndlCached() {
@@ -3234,10 +3234,13 @@ function altFor(d) {
   const l7 = Form.by[7].get(yj.slice(0, 7));
   if (l7) {
     // 成分が同じ：規格違い・剤形違い（OD錠と普通錠は9桁目で区別されることもあるので、名前と規格で判断）
-    const c = pick(l7, r => diffWord(d, r));
+    // 銘柄を除いた名前が同じ採用薬があれば採用あり（YJの9桁目が違っても同じ薬として扱う）
+    if (BRANDLESS && l7.some(r => FORM_USE.has(r.st) && shortName(r.n) === shortName(d.name))) return { kind: 'same', text: '' };
+    // 院内の名前で書く（同じ規格のものを先に）
+    const c = pick(l7, r => shortName(r.n)).sort((x, y) => (strengthOnly(y.r.n, y.r.y) === strengthOnly(d.name, d.yj)) - (strengthOnly(x.r.n, x.r.y) === strengthOnly(d.name, d.yj)));
     const words = [...new Set(c.map(x => x.label))];
     const sameStrength = c.some(x => strengthOnly(x.r.n, x.r.y) === strengthOnly(d.name, d.yj));
-    return { kind: sameStrength ? 'form' : 'strength', text: '院内採用:' + words.join('、'), cands: c };
+    return { kind: sameStrength ? 'form' : 'strength', text: '院内採用：' + words.join('、'), cands: c };
   }
   // 合剤：成分ごとに単剤を探す
   const comps = ingOf(yj).replace(/配合剤$/, '').split(/[・\/／]/).map(x => x.trim()).filter(Boolean);
