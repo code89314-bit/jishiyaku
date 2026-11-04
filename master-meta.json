@@ -34,14 +34,14 @@
   ]
  },
  "formulary": {
-  "version": "51ff47590a26",
+  "version": "0ecbef1ca132",
   "date": "2026/11/04",
   "count": 543,
   "counts": {
    "ok": 528,
-   "fix": 13,
+   "fix": 15,
    "amb": 0,
-   "check": 2,
+   "check": 0,
    "none": 0
   },
   "files": [
