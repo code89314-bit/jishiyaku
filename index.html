@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 06:35';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 06:43';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -1711,7 +1711,7 @@ async function tblOcr(src, onStatus = () => {}) {
   return { rows, grid };
 }
 
-try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a) }; } catch (e) {}
+try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a), searchMaster: (...a) => searchMaster(...a), review: t => openPanel({ type: "review", review: makeReview(t) }), norm: (q, l) => l ? normSpoken(q) : normName(q) }; } catch (e) {}
 // 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
 const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
 async function ndlCached() {
@@ -3844,6 +3844,9 @@ function prefixKeys(t) {
   return [...new Set(out)];
 }
 // 先頭に規格の数字を入れたとき（「5アムロジピン」「0.25ブロチ」）は、その規格の製剤だけにする
+// 名前に含まれる数字（「カロナール錠200」のように単位のない規格も拾う）
+const numsIn = n => [...normalize(String(n || '')).replace(/(\d),(\d)/g, '$1.$2').matchAll(/\d+(?:\.\d+)?/g)].map(m => String(+m[0]));
+// useForm：true＝採用薬を先頭に・棚表の表記でも引く・棚の1品目にまとめる（表モード）／'tag'＝採用の印を付けて先頭に並べるだけ（手帳の読み取り）
 function masterPrefix(q, useForm = false) {
   let t = normalize(String(q || '')).trim(), st = '';
   const m = t.match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(?=[^\d.\s])/i);
@@ -3855,18 +3858,22 @@ function masterPrefix(q, useForm = false) {
   for (let i = 0; i < PREFIX_KEYS.length; i++) {
     if (!ks.some(q => PREFIX_KEYS[i].startsWith(q))) continue;
     const it = Master.items[i];
-    if (st && !strengthNums(it.n).includes(st)) continue;
+    if (st && !numsIn(it.n).includes(st)) continue;
     if (BRANDLESS) { const g = Master.grp[i]; if (seenG.has(g)) continue; seenG.add(g); }
     out.push({ n: BRANDLESS ? brandless(it.n) : it.n, y: it.y || '', sim: 1, prefix: true });
   }
   if (!useForm || !Form.items.length) return out.sort((a, b) => a.n.localeCompare(b.n, 'ja'));
+  if (useForm === 'tag') {
+    for (const x of out) { const f = x.y ? (Form.by[9].get(x.y.slice(0, 9)) || []).find(r => FORM_USE.has(r.st) && shortName(r.n) === x.n) : null; if (f) x.form = f; }
+    return out.sort((a, b) => (a.form ? 0 : 1) - (b.form ? 0 : 1) || a.n.localeCompare(b.n, 'ja'));
+  }
   // 採用薬：棚表の表記（「テオドール」「フルナ-ゼ」など）でも引けるようにし、採用薬を先頭に並べる
   const have = new Set(out.map(x => (x.y || '').slice(0, 9)));
   for (const r of Form.items) {
     if (!r.y || !FORM_USE.has(r.st) || have.has(r.y.slice(0, 9))) continue;
     const rk = prefixKey(r.r);
     if (!ks.some(q => rk.startsWith(q))) continue;
-    if (st && !strengthNums(r.r).includes(st) && !strengthNums(r.n || '').includes(st)) continue;
+    if (st && !numsIn(r.r).includes(st) && !numsIn(r.n || '').includes(st)) continue;
     have.add(r.y.slice(0, 9));
     out.push({ n: BRANDLESS ? brandless(r.n || r.r) : (r.n || r.r), y: r.y, sim: 1, prefix: true, alias: r.r });
   }
@@ -4175,11 +4182,7 @@ const PANELS = {
                 <button class="x" data-act="rvDelDrug" data-i="${ci}" data-j="${di}" aria-label="薬品を削除">✕</button>
               </div>
               ${rv.clinics.length > 1 ? `<div class="rv-pair"><span>医療機関</span><select class="txt" data-rvmove="${ci}|${di}" aria-label="医療機関を変更">${rv.clinics.map((o, oi) => `<option value="${oi}" ${oi === ci ? 'selected' : ''}>${esc(o.name || '（名前なし）')}</option>`).join('')}</select></div>` : ''}
-              ${Master.ready ? (matched(d)
-                ? `<div class="rv-badge ok">✓ マスター照合 ${Math.round((d.matchSim || 1) * 100)}%${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>`
-                : `<div class="rv-badge ng">マスター未照合：候補をタップしてください</div>
-                   ${!d.showAll ? `<button class="btn ghost" data-act="rvAll" data-i="${ci}" data-j="${di}">同じ成分・規格の製品をすべて表示</button>` : ''}
-                   <div class="cands">${rvCands(d).map((c, k) => `<button class="cand" data-act="rvPick" data-i="${ci}" data-j="${di}" data-k="${k}"><span class="cn">${esc(c.n)}</span><span class="cs">一致度 ${Math.round(c.sim * 100)}%</span></button>`).join('')}</div>`) : ''}
+              <div id="rvM-${ci}-${di}">${rvMatchHTML(d, ci, di)}</div>
               <div class="rv-pair"><span>用量</span><input class="txt" data-rv="${ci}|${di}|dose" value="${esc(d.dose)}" placeholder="例: 1錠"></div>
               <div class="rv-pair"><span>用法</span><input class="txt" data-rv="${ci}|${di}|usage" value="${esc(d.usage)}" placeholder="例: 1日1回 朝食後 28日分"></div>
               ${d.rxName ? `<div class="rv-badge">処方名：${esc(d.rxName)}</div>` : ''}
@@ -4795,7 +4798,20 @@ const PANELS = {
 };
 
 // 確認画面の候補：上位6件。同じ成分・規格（YJ先頭9桁）の製品をまとめて広げられる
+function rvMatchHTML(d, ci, di) {
+  if (!Master.ready) return '';
+  if (matched(d)) return `<div class="rv-badge ok">✓ マスター照合 ${Math.round((d.matchSim || 1) * 100)}%${d.rawName && d.rawName !== d.name ? `（読取: ${esc(d.rawName)}）` : ''}</div>`;
+  const list = rvCands(d);
+  d.candList = list;
+  const pre = list[0]?.prefix;
+  return `<div class="rv-badge ng">マスター未照合：候補をタップしてください</div>
+    ${!d.showAll && !d.nameEdited ? `<button class="btn ghost" data-act="rvAll" data-i="${ci}" data-j="${di}">同じ成分・規格の製品をすべて表示</button>` : ''}
+    ${pre ? `<p class="muted" style="margin:4px 0">「${esc(d.name.trim())}」で始まる製品 ${list.length}件${list.some(x => x.form) ? '（採用薬を先頭に表示）' : ''}</p>` : ''}
+    <div class="cands"${list.length > 8 ? ' style="max-height:320px;overflow-y:auto"' : ''}>${list.map((c, k) => `<button class="cand" data-act="rvPick" data-i="${ci}" data-j="${di}" data-k="${k}"><span class="cn">${esc(c.n)}</span>${c.form ? `<span class="tag loc">採用${c.form.loc ? ' ' + esc(c.form.loc) : ''}</span>` : ''}${c.prefix ? '' : `<span class="cs">一致度 ${Math.round(c.sim * 100)}%</span>`}</button>`).join('') || '<p class="muted">候補がありません</p>'}</div>`;
+}
 function rvCands(d) {
+  // 名前を手で直したときは、入力した名前で探す（前方一致を全件、なければあいまい検索）
+  if (d.nameEdited) { const p = masterPrefix(d.name, 'tag'); return p.length ? p : searchMaster(d.name, 8, true); }
   const base = d.cands?.length ? d.cands : searchMaster(d.rawName || d.name, 6, true);
   if (!d.showAll || !base[0]?.y) return base;
   const y9 = base[0].y.slice(0, 9), seen = new Set(base.map(c => c.n));
@@ -5007,8 +5023,8 @@ const actions = {
   rvAll: el => { ui.panel.review.clinics[+el.dataset.i].drugs[+el.dataset.j].showAll = true; renderPanel(); },
   rvPick: el => {
     const d = ui.panel.review.clinics[+el.dataset.i].drugs[+el.dataset.j];
-    const c = rvCands(d)[+el.dataset.k];
-    if (c) { applyMaster(d, c, Math.max(c.sim, 0.99)); renderPanel(); }
+    const c = (d.candList || rvCands(d))[+el.dataset.k];
+    if (c) { applyMaster(d, c, Math.max(c.sim, 0.99)); d.nameEdited = false; d.cands = null; renderPanel(); }
   },
   rvDelClinic: el => {
     const i = +el.dataset.i, c = ui.panel.review.clinics[i];
@@ -5486,7 +5502,13 @@ document.addEventListener('input', e => {
     const [ci, di, f] = t.dataset.rv.split('|');
     const c = ui.panel.review.clinics[+ci];
     if (+di < 0) c.name = t.value;
-    else { c.drugs[+di][f] = t.value; if (f === 'name') { c.drugs[+di].yj = ''; c.drugs[+di].matchSim = 0; } }
+    else {
+      const d = c.drugs[+di]; d[f] = t.value;
+      if (f === 'name') {
+        d.yj = ''; d.matchSim = 0; d.nameEdited = true; d.cands = null;
+        const box = document.getElementById(`rvM-${ci}-${di}`); if (box) box.innerHTML = rvMatchHTML(d, +ci, +di);
+      }
+    }
     return;
   }
   if (t.dataset.f && ui.panel?.type === 'heat') {
