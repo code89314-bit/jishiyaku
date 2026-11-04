@@ -570,7 +570,7 @@ def build_formulary(items):
             continue
         code = fix or (row['code'] if YJ_RE.fullmatch(row['code']) else '')
         if code:
-            it = by_y.get(code)
+            it = by_y.get(code) or next((g for g in items if (g.get('y') or '')[:9] == code[:9]), None)   # 銘柄を区別しないので上9桁でも引く
             rec.update(y=code, n=it['n'] if it else raw, s=100, st='fix' if fix else 'ok')
             out.append(rec)
             continue
