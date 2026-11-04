@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-04 20:55';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 06:33';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -1711,7 +1711,7 @@ async function tblOcr(src, onStatus = () => {}) {
   return { rows, grid };
 }
 
-try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready }; } catch (e) {}
+try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length }; } catch (e) {}
 // 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
 const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
 async function ndlCached() {
@@ -3841,7 +3841,7 @@ function prefixKeys(t) {
   return [...new Set(out)];
 }
 // 先頭に規格の数字を入れたとき（「5アムロジピン」「0.25ブロチ」）は、その規格の製剤だけにする
-function masterPrefix(q) {
+function masterPrefix(q, useForm = false) {
   let t = normalize(String(q || '')).trim(), st = '';
   const m = t.match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(?=[^\d.\s])/i);
   if (m) { st = String(+m[1]); t = t.slice(m[0].length); }
@@ -3856,12 +3856,35 @@ function masterPrefix(q) {
     if (BRANDLESS) { const g = Master.grp[i]; if (seenG.has(g)) continue; seenG.add(g); }
     out.push({ n: BRANDLESS ? brandless(it.n) : it.n, y: it.y || '', sim: 1, prefix: true });
   }
-  return out.sort((a, b) => a.n.localeCompare(b.n, 'ja'));
+  if (!useForm || !Form.items.length) return out.sort((a, b) => a.n.localeCompare(b.n, 'ja'));
+  // 採用薬：棚表の表記（「テオドール」「フルナ-ゼ」など）でも引けるようにし、採用薬を先頭に並べる
+  const have = new Set(out.map(x => (x.y || '').slice(0, 9)));
+  for (const r of Form.items) {
+    if (!r.y || !FORM_USE.has(r.st) || have.has(r.y.slice(0, 9))) continue;
+    const rk = prefixKey(r.r);
+    if (!ks.some(q => rk.startsWith(q))) continue;
+    if (st && !strengthNums(r.r).includes(st) && !strengthNums(r.n || '').includes(st)) continue;
+    have.add(r.y.slice(0, 9));
+    out.push({ n: BRANDLESS ? brandless(r.n || r.r) : (r.n || r.r), y: r.y, sim: 1, prefix: true, alias: r.r });
+  }
+  for (const x of out) { const f = x.y ? (Form.by[9].get(x.y.slice(0, 9)) || [])[0] : null; if (f && FORM_USE.has(f.st)) x.form = f; }
+  // 採用薬は棚の1品目につき1行（院内の名前で）にまとめる
+  const seenF = new Set();
+  const res = out.filter(x => {
+    if (!x.form) return true;
+    if (seenF.has(x.form)) return false;
+    seenF.add(x.form);
+    const fn = BRANDLESS ? brandless(x.form.n || x.form.r) : (x.form.n || x.form.r);
+    if (fn !== x.n) { x.n = fn; x.y = x.form.y || x.y; }
+    if (!x.alias && prefixKey(x.form.r) !== prefixKey(fn)) x.alias = x.form.r;
+    return true;
+  });
+  return res.sort((a, b) => (a.form ? 0 : 1) - (b.form ? 0 : 1) || a.n.localeCompare(b.n, 'ja'));
 }
 // 表のセルの候補：入力された値で前方一致（全件）、なければあいまい検索
 function tblCandList(cell, typed) {
-  if (typed != null) { const p = masterPrefix(typed); return p.length ? p : searchMaster(typed, 10, true); }
-  if (cell.edited) { const p = masterPrefix(cell.value); if (p.length) return p; return searchMaster(cell.value, 10, true); }
+  if (typed != null) { const p = masterPrefix(typed, true); return p.length ? p : searchMaster(typed, 10, true); }
+  if (cell.edited) { const p = masterPrefix(cell.value, true); if (p.length) return p; return searchMaster(cell.value, 10, true); }
   return cell.cands || searchMaster(cell.read || cell.value, 6, true);
 }
 function tblCandHTML(list, typed) {
@@ -3869,8 +3892,8 @@ function tblCandHTML(list, typed) {
   const pre = list.length && list[0].prefix;
   const sm = String(typed || '').normalize('NFKC').trim().match(/^(\d+(?:\.\d+)?)\s*(?:mg|μg|g|%|mL)?\s*(.+)$/i);
   const label = sm ? `「${sm[2]}」で始まる規格${sm[1]}の製剤` : `「${typed}」で始まる製品`;
-  return (pre ? `<p class="muted" style="margin:0 0 4px">${esc(label)} ${list.length}件</p>` : '')
-    + (list.map((x, i) => `<button class="cand" data-act="tblPickCand" data-i="${i}"><span class="cn">${esc(x.n)}</span>${x.prefix ? '' : `<span class="cs">一致度 ${Math.round(x.sim * 100)}%</span>`}</button>`).join('') || '<p class="muted">候補がありません</p>');
+  return (pre ? `<p class="muted" style="margin:0 0 4px">${esc(label)} ${list.length}件${list.some(x => x.form) ? `（うち採用 ${list.filter(x => x.form).length}件を先頭に表示）` : ''}</p>` : '')
+    + (list.map((x, i) => `<button class="cand" data-act="tblPickCand" data-i="${i}"><span class="cn">${esc(x.n)}${x.alias && x.alias !== x.n ? `<span class="cs">（棚表：${esc(x.alias)}）</span>` : ''}</span>${x.form ? `<span class="tag loc">採用${x.form.loc ? ' ' + esc(x.form.loc) : ''}</span>` : ''}${x.prefix ? '' : `<span class="cs">一致度 ${Math.round(x.sim * 100)}%</span>`}</button>`).join('') || '<p class="muted">候補がありません</p>');
 }
 
 function matches(d) {
