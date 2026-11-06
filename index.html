@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-05 07:02';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-06 12:36';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -318,6 +318,13 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .tbl { border-collapse: collapse; font-size: 13px; min-width: 100%; }
 .tbl td { border: 1px solid var(--line); padding: 5px 6px; white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; cursor: pointer; background: var(--surface); color: var(--ink); }
 .tbl td.th { font-weight: 700; background: var(--bg); }
+.tbl.kyu td { padding: 2px; max-width: none; cursor: default; }
+.tbl.kyu td.th { padding: 5px 6px; }
+.kyu-in { font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--ink); padding: 6px 4px; min-height: 32px; box-sizing: border-box; }
+.kyu-in:focus { outline: 2px solid var(--accent); border-radius: 4px; }
+.kyu-wd { text-align: center; padding: 0 6px !important; }
+.kyu-wd.we { color: var(--warn); font-weight: 700; }
+.tbl.kyu .x { min-height: 30px; min-width: 30px; padding: 0; }
 .tc.st-master { background: var(--st-master); color: var(--ink); }
 .tc.st-check { background: var(--st-check); color: var(--ink); }
 .tc.st-diff { background: var(--st-diff); color: var(--ink); }
@@ -1725,7 +1732,7 @@ async function tblOcr(src, onStatus = () => {}) {
   return { rows, grid };
 }
 
-try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a), searchMaster: (...a) => searchMaster(...a), report: () => actions.report(), state: () => state, review: t => openPanel({ type: "review", review: makeReview(t) }), norm: (q, l) => l ? normSpoken(q) : normName(q) }; } catch (e) {}
+try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a), searchMaster: (...a) => searchMaster(...a), report: () => actions.report(), state: () => state, kyu: j => { kyuAdd(kyuRowsFromLLM(j)); openPanel({ type: 'kyu' }); return kyuCSV() + '\n' + kyuJSON().slice(0, 300); }, review: t => openPanel({ type: "review", review: makeReview(t) }), norm: (q, l) => l ? normSpoken(q) : normName(q) }; } catch (e) {}
 // 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
 const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
 async function ndlCached() {
@@ -1988,6 +1995,106 @@ function tblImage(src) {
   });
   return OCR.queue;
 }
+
+/* ---- 医師の休診日を読む：お知らせ・掲示を撮影 → LLMで1日1行に → CSV／JSON ---- */
+const LLM_KYU = `画像は病院・診療所の「休診・代診のお知らせ」「外来担当医表」「医師の不在予定」などです。医師が休診（不在）する予定を書き出し、JSONだけを返してください。
+規則：
+- 1件ずつ items に入れる。1つの欄に日付が複数あれば（「10/3・10/10」）日付ごとに分ける。期間（「10/3〜10/7」）は開始日と to（終わりの日）に入れる。
+- year：年が書かれていれば西暦（令和8年→2026）。書かれていなければ 0。month・day は数字。
+- to：期間の終わり {"month":0,"day":0}。期間でなければ null。
+- doctor：医師名（「先生」「医師」「Dr.」は除く）。書かれていなければ ""。
+- dept：診療科（例："内科"、"整形外科"）。書かれていなければ ""。
+- time："終日"・"午前"・"午後"・"夜間" のどれか、または書かれた時間帯（例："14時〜"）。書かれていなければ "終日"。
+- kind：書かれた区分（"休診"、"代診"、"診療時間変更" など）。区分がなければ "休診"。
+- sub：代診の医師名。なければ ""。
+- note：理由やその他の注意（例："学会"、"予約のみ"）。
+- 休診・代診・変更でない通常の担当（いつもの外来の曜日）は出さない。
+- 書かれていない情報を推測で補わない。読めない文字は「?」にする。
+出力形式：{"items":[{"year":0,"month":0,"day":0,"to":null,"doctor":"","dept":"","time":"","kind":"","sub":"","note":""}]}`;
+const KYU_COLS = [['date', '日付'], ['wd', '曜日'], ['doctor', '医師名'], ['dept', '診療科'], ['time', '時間帯'], ['kind', '区分'], ['sub', '代診医'], ['note', '備考']];
+const KYU = (() => { let o = {}; try { o = JSON.parse(localStorage.getItem('jishiyaku.kyu') || '{}'); } catch (e) {} return { rows: o.rows || [], note: '' }; })();
+const kyuSave = () => { try { localStorage.setItem('jishiyaku.kyu', JSON.stringify({ rows: KYU.rows })); } catch (e) {} };
+const WD = '日月火水木金土';
+const kyuWd = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? WD[new Date(+m[1], +m[2] - 1, +m[3]).getDay()] : ''; };
+const isoOf = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+// 年が書かれていない日付：今日の60日前〜300日後に入る年とみなす
+function kyuYear(m, d) {
+  const now = new Date(), y = now.getFullYear();
+  for (const yy of [y, y + 1, y - 1]) { const t = new Date(yy, m - 1, d); if (t - now > -60 * 864e5 && t - now < 300 * 864e5) return yy; }
+  return y;
+}
+function kyuRowsFromLLM(j) {
+  const S = v => normalize(String(v ?? '')).replace(/[?？]{2,}/g, '?').trim();
+  const out = [];
+  for (const it of Array.isArray(j?.items) ? j.items : []) {
+    const m = +it.month, d = +it.day;
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31)) continue;
+    let y = +it.year; if (!(y >= 2000 && y <= 2100)) y = kyuYear(m, d);
+    const start = new Date(y, m - 1, d);
+    let end = start;
+    if (it.to && +it.to.month >= 1 && +it.to.day >= 1) {
+      end = new Date(y, +it.to.month - 1, +it.to.day);
+      if (end < start) end = new Date(y + 1, +it.to.month - 1, +it.to.day);   // 年をまたぐ期間
+      if ((end - start) / 864e5 > 92) end = start;                           // 読み違いで長すぎる期間は開始日だけ
+    }
+    const base = { doctor: S(it.doctor).replace(/(先生|医師|Dr\.?)$/i, '').trim(), dept: S(it.dept), time: S(it.time) || '終日', kind: S(it.kind) || '休診', sub: S(it.sub), note: S(it.note) };
+    for (let t = new Date(start); t <= end; t.setDate(t.getDate() + 1)) {
+      const date = isoOf(t.getFullYear(), t.getMonth() + 1, t.getDate());
+      out.push({ date, ...base });
+    }
+  }
+  return out;
+}
+const kyuKey = r => [r.date, r.doctor.replace(/\s/g, ''), r.time].join('|');
+function kyuAdd(rows) {
+  const have = new Set(KYU.rows.map(kyuKey));
+  let added = 0;
+  for (const r of rows) { const k = kyuKey(r); if (have.has(k)) continue; have.add(k); KYU.rows.push(r); added++; }
+  KYU.rows.sort((a, b) => a.date.localeCompare(b.date) || a.dept.localeCompare(b.dept, 'ja') || a.doctor.localeCompare(b.doctor, 'ja'));
+  kyuSave();
+  return added;
+}
+async function llmKyu(src) {
+  const c = llmCfg(), url = await toJpegDataURL(src, 2400), now = new Date();
+  const r = await llmFetch('/v1/chat/completions', {
+    model: c.model, temperature: 0, max_tokens: 4000, response_format: { type: 'json_object' },
+    chat_template_kwargs: { enable_thinking: false }, experimental_speed_projection: false,
+    messages: [{ role: 'system', content: LLM_KYU },
+      { role: 'user', content: [{ type: 'text', text: `今日は${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日です。この画像から休診の予定を書き出してください。` }, { type: 'image_url', image_url: { url } }] }]
+  });
+  const txt = r?.choices?.[0]?.message?.content || '', m = txt.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('LLMの返答がJSONではありません');
+  return kyuRowsFromLLM(JSON.parse(m[0]));
+}
+function kyuImage(src) {
+  if (!llmReady()) { ocrStatus('このモードはLLMサーバを使います。メニュー →「LLMサーバ」で有効にしてください', 0); return; }
+  OCR.pending++;
+  ocrStatus(`LLMサーバで読み取り中…（${OCR.pending}枚・1枚30秒ほど）`, 0.3);
+  OCR.queue = OCR.queue.then(async () => {
+    try {
+      const rows = await llmKyu(src);
+      const n = kyuAdd(rows);
+      OCR.pending--;
+      ocrStatus(OCR.pending ? `読み取り中…（残り${OCR.pending}枚）` : rows.length ? `${rows.length}件を読み取り、${n}件を追加しました${rows.length > n ? `（${rows.length - n}件は同じ行がすでにあるため省略）` : ''}。内容を確認してください。` : '休診の予定が見つかりませんでした', 1);
+      if (ui.panel?.type === 'kyu') renderPanel();
+    } catch (err) {
+      OCR.pending--; console.error(err);
+      ocrStatus('読み取れませんでした（' + (err?.message || err) + '）', 0);
+    }
+  });
+  return OCR.queue;
+}
+function kyuCSV() {
+  const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  return [KYU_COLS.map(c => c[1]), ...KYU.rows.map(r => KYU_COLS.map(([k]) => k === 'wd' ? kyuWd(r.date) : r[k]))].map(r => r.map(q).join(',')).join('\r\n');
+}
+const kyuJSON = () => JSON.stringify(KYU.rows.map(r => ({ date: r.date, weekday: kyuWd(r.date), doctor: r.doctor, dept: r.dept, time: r.time, kind: r.kind, sub: r.sub, note: r.note })), null, 2);
+function saveFile(name, text, type) {
+  const blob = new Blob([text], { type }), a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+const ymd = () => { const d = new Date(); return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`; };
 // CSV：薬品名の列の後ろに「YJコード」「照合」を足す（設定でオン・オフ）
 function tblCSV() {
   const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
@@ -2071,10 +2178,11 @@ async function camOpen(mode = 'ocr') {
   $('#cam').classList.toggle('gs1', gs1);
   $('.cam .shutter').hidden = gs1;
   Cam.shots = 0; $('#camCount').textContent = gs1 ? 'GS1読み取り' : '撮影 0枚';
-  $('#camMsg').textContent = gs1 ? 'PTPシートのバーコードを枠の中に映してください' : mode === 'rpt' ? 'レポートの画面を枠に合わせて撮影（長いときは分けて撮影）' : mode === 'tbl' ? '表を正面から、罫線がまっすぐになるように撮影（長い表は分けて撮影）' : '1ページずつ枠に合わせて撮影';
+  $('#camMsg').textContent = gs1 ? 'PTPシートのバーコードを枠の中に映してください' : mode === 'rpt' ? 'レポートの画面を枠に合わせて撮影（長いときは分けて撮影）' : mode === 'tbl' ? '表を正面から、罫線がまっすぐになるように撮影（長い表は分けて撮影）' : mode === 'kyu' ? '休診のお知らせを枠に合わせて撮影（何枚でも続けて撮れます）' : '1ページずつ枠に合わせて撮影';
   $('#cam').hidden = false;
   if (gs1) return true;
   ocrStatus(OCR.status);
+  if (mode === 'kyu') return true;
   if (ocrEngine() === 'ndl') ndlLoad((t, p) => { if (!OCR.pending) ocrStatus(t, p); }).then(() => { if (!OCR.pending) ocrStatus(''); }).catch(() => {});   // 撮影中にエンジンを準備しておく
   else getWorker().catch(() => {});
   return true;
@@ -2096,7 +2204,7 @@ function camShot() {
   c.width = v.videoWidth; c.height = v.videoHeight;
   c.getContext('2d').drawImage(v, 0, 0);
   const mode = Cam.mode;
-  setTimeout(() => { if (mode === 'rpt') rptImage(c); else if (mode === 'tbl') tblImage(c); else ocrImage(c); ocrStatus(OCR.status); }, 0);
+  setTimeout(() => { if (mode === 'rpt') rptImage(c); else if (mode === 'tbl') tblImage(c); else if (mode === 'kyu') kyuImage(c); else ocrImage(c); ocrStatus(OCR.status); }, 0);
 }
 async function camTorch() {
   const track = Cam.stream?.getVideoTracks()[0];
@@ -4617,6 +4725,50 @@ const PANELS = {
 
 
 
+  kyu() {
+    const cam = canScanGS1(), rows = KYU.rows, inp = (i, k, v, extra = '') => `<input class="kyu-in" data-kyu="${i}|${k}" value="${esc(v || '')}"${extra}>`;
+    return {
+      title: '医師の休診日を読む',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block">
+          <h3>お知らせを取り込む<small>休診・代診のお知らせ、掲示、外来担当表など</small></h3>
+          ${llmReady() ? '' : '<p class="warnline">このモードはLLMサーバを使います。メニュー →「LLMサーバ」で有効にしてください。</p>'}
+          <div class="ocr-btns">
+            ${cam ? `<button class="btn primary" data-act="kyuCam"${llmReady() ? '' : ' disabled'}>カメラで撮る（無音）</button>` : ''}
+            <label class="btn filebtn${cam ? '' : ' primary'}" for="kyuFile">画像を選ぶ</label>
+            <input type="file" id="kyuFile" accept="image/*" multiple hidden>
+          </div>
+          <div class="ocr-status" id="ocrStatus" ${OCR.status ? '' : 'hidden'}>
+            <div class="ocr-bar"><span id="ocrBar" style="width:${Math.round((OCR.progress || 0) * 100)}%"></span></div>
+            <p class="muted" id="ocrMsg">${esc(OCR.status || '')}</p>
+          </div>
+          <p class="muted">LLMで読み取り、1日1行（医師・日付・時間帯ごと）にします。「10/3〜10/7」のような期間は1日ずつに分けます。年が書かれていない日付は、今日に近い年とみなします。何枚撮っても続けて追加され、同じ行は重ねません。</p>
+        </div>
+        ${rows.length ? `<div class="block">
+          <h3>休診の一覧<small>${rows.length}行・タップで直せます</small></h3>
+          <div class="tbl-wrap"><table class="tbl kyu">
+            <tr>${KYU_COLS.map(c => `<td class="th">${c[1]}</td>`).join('')}<td class="th"></td></tr>
+            ${rows.map((r, i) => `<tr>
+              <td><input type="date" class="kyu-in" data-kyu="${i}|date" value="${esc(r.date)}"></td>
+              <td class="kyu-wd${/[土日]/.test(kyuWd(r.date)) ? ' we' : ''}">${kyuWd(r.date)}</td>
+              <td>${inp(i, 'doctor', r.doctor, ' style="width:7em"')}</td>
+              <td>${inp(i, 'dept', r.dept, ' style="width:7em"')}</td>
+              <td>${inp(i, 'time', r.time, ' style="width:4.5em" list="kyuTimes"')}</td>
+              <td>${inp(i, 'kind', r.kind, ' style="width:5em" list="kyuKinds"')}</td>
+              <td>${inp(i, 'sub', r.sub, ' style="width:6em"')}</td>
+              <td>${inp(i, 'note', r.note, ' style="width:8em"')}</td>
+              <td><button class="x" data-act="kyuDel" data-i="${i}" aria-label="この行を削除">✕</button></td></tr>`).join('')}
+          </table></div>
+          <datalist id="kyuTimes"><option>終日</option><option>午前</option><option>午後</option><option>夜間</option></datalist>
+          <datalist id="kyuKinds"><option>休診</option><option>代診</option><option>診療時間変更</option></datalist>
+          <div class="inline" style="margin-top:6px"><button class="btn" data-act="kyuAddRow">＋ 行を追加</button></div>
+          <p class="okline" role="status">${esc(KYU.note || '')}</p>
+          <div class="inline"><button class="btn primary" data-act="kyuCsv">CSVを保存</button><button class="btn primary" data-act="kyuJson">JSONを保存</button><button class="btn" data-act="kyuCopy" data-v="csv">CSVをコピー</button><button class="btn" data-act="kyuCopy" data-v="json">JSONをコピー</button><button class="btn ghost danger" data-act="kyuClear">消去</button></div>
+        </div>` : ''}`
+    };
+  },
+
   tbl() {
     const cam = canScanGS1(), sel = TBL.sel, nc = Math.max(0, ...TBL.rows.map(r => r.length));
     const ST = { master: 'マスターと一致', check: '薬品名を確認', diff: 'OCRとLLMの読みが違う', low: '読み取りの確信度が低い', single: '片方だけが読んだ' };
@@ -4896,6 +5048,7 @@ const PANELS = {
         <div class="menu-list">
           <button class="btn primary" data-act="rptPanel">持参薬レポートを読む（服用開始・一包化）</button>
           <button class="btn" data-act="tblPanel">薬品リスト（表）を読む → CSV</button>
+          <button class="btn" data-act="kyuPanel">医師の休診日を読む → CSV・JSON</button>
           <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
           <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
           ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="ocrPanel">端末内の読み取り（${ocrEngine() === 'ndl' ? 'NDLOCR-Lite' : 'Tesseract'}）</button>` : ''}
@@ -5392,6 +5545,14 @@ const actions = {
   rptPanel: () => { if (!RPT.doc && RPT.text.trim()) rptReparse(); openPanel({ type: 'rpt' }); },
   rptCam: () => camOpen('rpt'),
   tblPanel: () => { TBL.note = ''; openPanel({ type: 'tbl' }); },
+  kyuPanel: () => { KYU.note = ''; openPanel({ type: 'kyu' }); },
+  kyuCam: () => camOpen('kyu'),
+  kyuDel: el => { KYU.rows.splice(+el.dataset.i, 1); kyuSave(); renderPanel(); },
+  kyuAddRow: () => { const last = KYU.rows[KYU.rows.length - 1]; KYU.rows.push({ date: last?.date || isoOf(new Date().getFullYear(), new Date().getMonth() + 1, new Date().getDate()), doctor: '', dept: last?.dept || '', time: '終日', kind: '休診', sub: '', note: '' }); kyuSave(); renderPanel(); },
+  kyuCsv: () => { saveFile(`休診日_${ymd()}.csv`, '﻿' + kyuCSV(), 'text/csv;charset=utf-8'); KYU.note = 'CSVを保存しました（Excelで開ける形式・UTF-8）'; renderPanel(); },
+  kyuJson: () => { saveFile(`休診日_${ymd()}.json`, kyuJSON(), 'application/json'); KYU.note = 'JSONを保存しました'; renderPanel(); },
+  kyuCopy: async el => { try { await navigator.clipboard.writeText(el.dataset.v === 'json' ? kyuJSON() : kyuCSV()); KYU.note = (el.dataset.v === 'json' ? 'JSON' : 'CSV') + 'をコピーしました'; } catch (e) { KYU.note = 'コピーできませんでした。保存のボタンを使ってください'; } renderPanel(); },
+  kyuClear: () => { KYU.rows = []; KYU.note = ''; kyuSave(); ocrStatus(''); renderPanel(); },
   tblCam: () => camOpen('tbl'),
   tblSel: el => { TBL.sel = [+el.dataset.r, +el.dataset.c]; TBL.typed = null; renderPanel(); const d = $('.tbl-detail'); if (d) d.scrollIntoView({ block: 'nearest' }); },
   tblSelClose: () => { TBL.sel = null; TBL.typed = null; renderPanel(); },
@@ -5676,6 +5837,16 @@ document.addEventListener('change', async e => {
   if (e.target.classList?.contains('insPrepDate') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].until = isoToMD(e.target.value); rptApplyInstr(); return; }
   if (e.target.classList?.contains('insPrepRemain') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].remain = e.target.checked; rptApplyInstr(); return; }
   if (e.target.id === 'insExtra' && RPT.instr) { RPT.instr.extra = e.target.value.split('\n').map(x => x.trim()).filter(Boolean); rptApplyInstr(); return; }
+  if (e.target.id === 'kyuFile' && e.target.files.length) {
+    const files = [...e.target.files]; e.target.value = '';
+    for (const f of files) kyuImage(f);
+    return;
+  }
+  if (e.target.dataset?.kyu) {
+    const [i, k] = e.target.dataset.kyu.split('|'), r = KYU.rows[+i];
+    if (r) { r[k] = e.target.value.trim(); kyuSave(); if (k === 'date') renderPanel(); }
+    return;
+  }
   if (e.target.id === 'tblFile' && e.target.files.length) {
     const files = [...e.target.files]; e.target.value = '';
     for (const f of files) tblImage(f);
