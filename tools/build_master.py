@@ -442,6 +442,7 @@ def parse_supply(tables):
 # ---------- 採用薬リスト（棚表） ----------
 FORM_SRC = ROOT / 'formulary-src'
 FIXES = ROOT / 'formulary-fixes.csv'
+EDITS = ROOT / 'formulary-edits.csv'   # アプリから足した・引いた採用薬（操作,棚表の表記,YJコード,棚番,備考,日時）
 FOLD = str.maketrans({'パ': 'バ', 'ピ': 'ビ', 'プ': 'ブ', 'ペ': 'ベ', 'ポ': 'ボ', '一': 'ー', '－': 'ー', '‐': 'ー', '-': 'ー',
                       '口': 'ロ', '力': 'カ', '工': 'エ', '夕': 'タ', '卜': 'ト'})
 NUM_RE = re.compile(r'\d+(?:\.\d+)?')
@@ -631,12 +632,43 @@ def build_formulary(items):
         if st != 'ok':
             rec['c'] = [[it['n'], it.get('y', ''), sc] for sc, it in uniq]
         out.append(rec)
-    counts = {k: sum(1 for r in out if r['st'] == k) for k in ('ok', 'fix', 'amb', 'check', 'none')}
+    # アプリからの追加・削除（同じ名前は最後の操作が有効）
+    if EDITS.exists():
+        import csv
+        last = {}
+        for r in csv.reader(io.StringIO(decode(EDITS.read_bytes()))):
+            if len(r) < 2 or r[0].strip() not in ('追加', '削除') or not r[1].strip():
+                continue
+            r = (r + [''] * 6)[:6]
+            last[nkey(r[1])] = [x.strip() for x in r]
+        for key, (op, name, code, loc, memo, _) in last.items():
+            idx = next((i for i, rec in enumerate(out) if nkey(rec['r']) == key), None)
+            if op == '削除':
+                if idx is not None:
+                    out.pop(idx)
+                continue
+            code = code.upper()
+            if idx is not None:                     # すでにある品目：棚番・備考・YJを上書き
+                rec = out[idx]
+            else:
+                rec = {'r': name}
+                out.append(rec)
+            if loc:
+                rec['loc'] = loc
+            if memo:
+                rec['memo'] = memo
+            if YJ_RE.fullmatch(code):
+                it = by_y.get(code) or next((g for g in items if (g.get('y') or '')[:9] == code[:9]), None)
+                rec.update(y=code, n=it['n'] if it else name, s=100, st='add')
+                rec.pop('c', None)
+            elif idx is None:
+                rec.update(st='none')
+    counts = {k: sum(1 for r in out if r['st'] == k) for k in ('ok', 'fix', 'add', 'amb', 'check', 'none')}
     ver = hashlib.sha1(json.dumps(out, ensure_ascii=False).encode()).hexdigest()[:12]
     meta = {'version': ver, 'date': datetime.now(JST).strftime('%Y/%m/%d'), 'count': len(out), 'counts': counts,
             'files': [p.name for p in sorted(FORM_SRC.glob('*')) if p.is_file() and not p.name.startswith('.') and p.name != 'README.md']}
     write_json(ROOT / 'formulary.json', {'meta': meta, 'items': out})
-    print(f'棚表 {len(out):,}品目 確定{counts["ok"] + counts["fix"]:,} 銘柄あいまい{counts["amb"]:,} 要確認{counts["check"]:,} 該当なし{counts["none"]:,}')
+    print(f'棚表 {len(out):,}品目 確定{counts["ok"] + counts["fix"] + counts["add"]:,} 銘柄あいまい{counts["amb"]:,} 要確認{counts["check"]:,} 該当なし{counts["none"]:,}')
     return meta
 
 
@@ -647,6 +679,7 @@ def write_json(path, obj):
 def main():
     args = [u for a in sys.argv[1:] for u in a.split()]
     auto = '--auto' in args
+    only_form = '--formulary' in args            # 採用薬リストだけ作り直す（アプリからの追加・削除のとき）
     urls = [a for a in args if a.startswith('http')]
     meta_path = ROOT / 'master-meta.json'
     meta = json.loads(meta_path.read_text(encoding='utf-8')) if meta_path.exists() else {}
@@ -675,6 +708,8 @@ def main():
             sources.append((url.rsplit('/', 1)[-1].split('?')[0] or 'download', http_get(url)))
         except Exception as e:
             failed.append(f'{url}: {e}')
+    if only_form:
+        sources = []
     if sources:
         items, rows_read, linked, unlinked = build(sources)
         if items:

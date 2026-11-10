@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-06 12:36';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-10 17:16';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -334,7 +334,10 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .tbl-legend .tc { padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); }
 .tbl-detail .chip small { display: block; margin: 2px 0 0; }
 .tag.loc { margin-left: 6px; background: var(--accent-soft); color: var(--accent); font-weight: 700; }
-.frow { padding: 8px 2px; border-top: 1px solid var(--line); }
+.frow { padding: 8px 2px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.frow .info { flex: 1; min-width: 0; }
+.frow .confirm { flex: 0 0 100%; }
+.frow .x { min-height: 36px; min-width: 36px; padding: 0; }
 .frow:first-child { border-top: 0; }
 .tbl-cands { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
@@ -3273,7 +3276,75 @@ async function pullSupply(meta) {
 /* ---- 院内採用薬リスト（棚表をマスターと照合した結果）と代替薬の判定 ----
    YJコード（12桁）：1-4 薬効分類／5-7 投与経路・成分／8 剤形／9 規格／10-11 銘柄 */
 const Form = { items: [], meta: null, byY: new Map(), by: { 9: new Map(), 8: new Map(), 7: new Map(), 4: new Map() }, fixes: [] };
-const FORM_USE = new Set(['ok', 'fix', 'amb']);
+const FORM_USE = new Set(['ok', 'fix', 'amb', 'add']);
+/* ---- 採用薬の追加・削除：GitHub の formulary-edits.csv に1行ずつ書き足す（全端末で共有）
+   書き込みには、この端末に入れたGitHubのトークン（このリポジトリの Contents 読み書きだけ）を使う。トークンはこの端末の中だけに保存する。
+   書き込んだ内容は、サーバーの採用薬リストに反映されるまで、この端末では「反映待ち」として先に使う */
+const GH = (() => {
+  const m = location.hostname.match(/^([\w-]+)\.github\.io$/), seg = location.pathname.split('/').filter(Boolean)[0];
+  return { owner: m ? m[1] : 'code89314-bit', repo: m && seg ? seg : 'jishiyaku', path: 'formulary-edits.csv', branch: 'main' };
+})();
+const ghToken = () => { try { return localStorage.getItem('jishiyaku.ghtoken') || ''; } catch (e) { return ''; } };
+let FORM_PENDING = (() => { try { return JSON.parse(localStorage.getItem('jishiyaku.formpending') || '[]'); } catch (e) { return []; } })();
+const formPendingSave = () => { try { localStorage.setItem('jishiyaku.formpending', JSON.stringify(FORM_PENDING)); } catch (e) {} };
+const fKey = s => normalize(String(s || '')).replace(/\s/g, '');
+// サーバーのリストにすでに反映された操作は消し、残りを手元のリストに重ねる
+function formRebuild() {
+  Form.items = (Form.base || []).map(x => ({ ...x }));
+  applyLocalFixes(); applyPending(); buildFormIndex(); formLocCache.clear();
+}
+function applyPending() {
+  const has = r => Form.items.find(x => fKey(x.r) === fKey(r));
+  FORM_PENDING = FORM_PENDING.filter(e => {
+    const x = has(e.r);
+    if (e.op === '削除') return !!x;
+    return !(x && (!e.y || x.y === e.y) && (!e.loc || x.loc === e.loc));
+  });
+  formPendingSave();
+  for (const e of FORM_PENDING) {
+    const i = Form.items.findIndex(x => fKey(x.r) === fKey(e.r));
+    if (e.op === '削除') { if (i >= 0) Form.items.splice(i, 1); continue; }
+    const rec = i >= 0 ? Form.items[i] : (Form.items.push({ r: e.r }), Form.items[Form.items.length - 1]);
+    if (e.loc) rec.loc = e.loc;
+    if (e.memo) rec.memo = e.memo;
+    if (e.y) Object.assign(rec, { y: e.y, n: e.n || e.r, s: 100, st: 'add' });
+    rec.pending = true;
+  }
+}
+const b64utf8 = { dec: b => new TextDecoder().decode(Uint8Array.from(atob(b.replace(/\s/g, '')), c => c.charCodeAt(0))),
+  enc: t => { const u = new TextEncoder().encode(t); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000)); return btoa(s); } };
+async function ghAppendEdit(e) {
+  const tok = ghToken();
+  if (!tok) throw new Error('GitHubのトークンが入っていません');
+  const url = `https://api.github.com/repos/${GH.owner}/${GH.repo}/contents/${GH.path}`;
+  const H = { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const now = new Date(), stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const line = [e.op, e.r, e.y || '', e.loc || '', e.memo || '', stamp].map(q).join(',');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const g = await fetch(url + '?ref=' + GH.branch + '&t=' + Date.now(), { headers: H, cache: 'no-store' });
+    if (g.status === 401) throw new Error('トークンが無効です（期限切れ・入力間違い）');
+    if (g.status === 403) throw new Error('トークンに書き込みの権限がありません');
+    let text = '操作,棚表の表記,YJコード,棚番,備考,日時\n', sha;
+    if (g.ok) { const j = await g.json(); sha = j.sha; text = b64utf8.dec(j.content || ''); }
+    else if (g.status !== 404) throw new Error('GitHubに接続できませんでした（' + g.status + '）');
+    if (!text.endsWith('\n')) text += '\n';
+    const body = { message: `採用薬を${e.op}：${e.r}`, content: b64utf8.enc(text + line + '\n'), branch: GH.branch };
+    if (sha) body.sha = sha;
+    const r = await fetch(url, { method: 'PUT', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.ok) return;
+    if (r.status === 409 || r.status === 422) continue;   // ほかの端末と同時に書いた：読み直してもう一度
+    if (r.status === 401) throw new Error('トークンが無効です（期限切れ・入力間違い）');
+    if (r.status === 403 || r.status === 404) throw new Error('トークンに書き込みの権限がありません（このリポジトリの Contents: Read and write が必要です）');
+    throw new Error('GitHubに書き込めませんでした（' + r.status + '）');
+  }
+  throw new Error('GitHubに書き込めませんでした（同時に書き込みが重なりました。もう一度お試しください）');
+}
+async function formEdit(e) {
+  await ghAppendEdit(e);
+  FORM_PENDING.push(e); formPendingSave();
+  formRebuild();
+}
 function buildFormIndex() {
   Form.byY = new Map(); for (const k of [9, 8, 7, 4]) Form.by[k] = new Map();
   for (const r of Form.items) {
@@ -3289,9 +3360,9 @@ async function pullFormulary(meta) {
     const r = await fetch('formulary.json?v=' + encodeURIComponent(fv), { cache: 'no-store' });
     if (!r.ok) return false;
     const data = await r.json();
-    Form.items = data.items || []; Form.meta = data.meta || meta.formulary;
-    applyLocalFixes(); buildFormIndex(); formLocCache.clear();
-    await idbSet('formulary', { items: Form.items, meta: Form.meta });
+    Form.base = data.items || []; Form.meta = data.meta || meta.formulary;
+    await idbSet('formulary', { items: Form.base, meta: Form.meta });
+    formRebuild();
     return true;
   } catch (e) { return false; }
 }
@@ -4330,10 +4401,28 @@ function formFilter(q) {
     || (ks.some(k => prefixKey(r.r).startsWith(k) || prefixKey(shortName(r.n || '')).startsWith(k)) && (!st || strengthNums(r.n || r.r).includes(st) || strengthNums(r.r).includes(st))));
 }
 function formRowsHTML(rows) {
+  const del = ui.panel?.del;
   return rows.slice(0, 400).map(r => `<div class="frow">
+      ${del === r.r ? `<div class="confirm" style="margin-bottom:6px"><p>「${esc(r.n ? shortName(r.n) : r.r)}」を採用薬から外します（全端末）。</p>
+        <div class="inline"><button class="btn danger" data-act="formDelGo" data-r="${esc(r.r)}">外す</button><button class="btn" data-act="formDelNo">やめる</button></div></div>` : ''}
       <div class="info"><div class="dname">${esc(r.n ? shortName(r.n) : r.r)}${r.loc ? `<span class="tag loc">${esc(r.loc)}</span>` : ''}</div>
-      <div class="sub">${r.n && shortName(r.n) !== r.r ? '棚表：' + esc(r.r) : ''}${r.memo ? `${r.n && shortName(r.n) !== r.r ? '・' : ''}${esc(r.memo)}` : ''}${['check', 'none'].includes(r.st) ? ' <span class="tag warn">' + (r.st === 'check' ? '要確認' : '該当なし') + '</span>' : ''}</div></div>
+      <div class="sub">${r.n && shortName(r.n) !== r.r ? '棚表：' + esc(r.r) : ''}${r.memo ? `${r.n && shortName(r.n) !== r.r ? '・' : ''}${esc(r.memo)}` : ''}${['check', 'none'].includes(r.st) ? ' <span class="tag warn">' + (r.st === 'check' ? '要確認' : '該当なし') + '</span>' : ''}${r.st === 'add' ? ' <span class="tag note">追加</span>' : ''}${r.pending ? ' <span class="tag note">反映待ち</span>' : ''}</div></div>
+      <button class="x" data-act="formDel" data-r="${esc(r.r)}" aria-label="採用薬から外す">✕</button>
     </div>`).join('') + (rows.length > 400 ? `<p class="muted">ほか ${rows.length - 400}件（絞り込んでください）</p>` : '');
+}
+function formAddCands(list) {
+  if (ui.panel) ui.panel.cands = list;
+  return list.slice(0, 80).map((c, i) => `<button class="cand" data-act="formAddPick" data-i="${i}"><span class="cn">${esc(c.n)}</span>${c.form ? `<span class="tag loc">採用${c.form.loc ? ' ' + esc(c.form.loc) : ''}</span>` : `<span class="cs">YJ ${esc((c.y || '').slice(0, 9))}</span>`}</button>`).join('')
+    + (list.length > 80 ? `<p class="muted">ほか ${list.length - 80}件（もう少し入れてください）</p>` : '');
+}
+function ghBlock() {
+  const t = ghToken();
+  return `<details class="block"${t ? '' : ' open'}><summary><b>GitHubへの書き込み設定</b>${t ? '（設定済み）' : '（未設定）'}</summary>
+    <p class="muted">採用薬の追加・削除は、GitHub（${esc(GH.owner)}/${esc(GH.repo)}）の formulary-edits.csv に書き込み、全端末に反映します。書き込みには、端末ごとに一度だけトークンを入れてください。トークンはこの端末の中だけに保存し、外には送りません（GitHubとの通信だけに使います）。</p>
+    <p class="muted">作り方：GitHub → Settings → Developer settings → Fine-grained personal access tokens → Generate new token。Repository access は「Only select repositories」で ${esc(GH.repo)} だけ、Permissions は「Contents: Read and write」だけにします。</p>
+    <div class="field"><label for="ghTok">トークン</label><input id="ghTok" type="password" value="${esc(t)}" placeholder="github_pat_…" autocomplete="off" autocorrect="off" spellcheck="false"></div>
+    <div class="inline"><button class="btn primary" data-act="ghTokSave">保存</button>${t ? '<button class="btn ghost danger" data-act="ghTokDel">この端末から消す</button>' : ''}</div>
+  </details>`;
 }
 const PANELS = {
   scan() {
@@ -4663,9 +4752,32 @@ const PANELS = {
       title: '院内採用薬（棚番）',
       left: `<button class="btn ghost" data-act="masterPanel">‹ 戻る</button>`,
       body: `
+        ${p.msg ? `<p class="${p.err ? 'warnline' : 'okline'}" role="status">${esc(p.msg)}</p>` : ''}
+        <div class="inline" style="margin-bottom:8px"><button class="btn primary" data-act="formAdd">＋ 採用薬を追加</button>${FORM_PENDING.length ? `<span class="muted">反映待ち ${FORM_PENDING.length}件（2〜3分で全端末に反映）</span>` : ''}</div>
         <div class="field"><label for="formQ">薬品名・棚番で探す（前方一致）</label><input id="formQ" value="${esc(q)}" placeholder="例：アムロ、5アムロ、A-2" autocomplete="off"></div>
-        <p class="muted">${rows.length.toLocaleString()}品目</p>
-        <div class="flist" id="formRows">${formRowsHTML(rows)}</div>`
+        <p class="muted">${rows.length.toLocaleString()}品目・右の✕で採用薬から外せます</p>
+        <div class="flist" id="formRows">${formRowsHTML(rows)}</div>
+        ${ghBlock()}`
+    };
+  },
+  formAdd() {
+    const p = ui.panel, pick = p.pick;
+    const list = !pick && (p.q || '').trim().length >= 2 ? masterPrefix(p.q, 'tag') : [];
+    return {
+      title: '採用薬を追加',
+      left: `<button class="btn ghost" data-act="formList">‹ 戻る</button>`,
+      body: `
+        ${p.msg ? `<p class="${p.err === false ? 'okline' : 'warnline'}" role="status">${esc(p.msg)}</p>` : ''}
+        ${pick ? `<div class="block"><h3>${esc(pick.n)}<small>YJ ${esc(pick.y)}</small></h3>
+            ${pick.form ? `<p class="warnline">すでに採用薬です（棚：${esc(pick.form.loc || 'なし')}）。追加すると棚番・備考を上書きします。</p>` : ''}
+            <div class="field"><label for="faName">棚表の表記<small>リストに出る名前</small></label><input id="faName" value="${esc(p.name ?? pick.n)}" autocomplete="off"></div>
+            <div class="field"><label for="faLoc">棚番（空欄可）</label><input id="faLoc" value="${esc(p.loc || '')}" placeholder="例：A-2-d、冷蔵庫1" autocomplete="off"></div>
+            <div class="field"><label for="faMemo">備考（空欄可）</label><input id="faMemo" value="${esc(p.memo || '')}" placeholder="例：〇〇後発品" autocomplete="off"></div>
+            <div class="inline"><button class="btn primary" data-act="formAddGo"${p.busy ? ' disabled' : ''}>${p.busy ? '書き込み中…' : '追加する（全端末）'}</button><button class="btn" data-act="formAddRe">薬を選び直す</button></div>
+          </div>`
+        : `<div class="field"><label for="faQ">薬品名で探す（前方一致・先頭の数字は規格）</label><input id="faQ" value="${esc(p.q || '')}" placeholder="例：5アムロ、ビソプロ" autocomplete="off"></div>
+          <div class="cands" id="faCands" style="max-height:60vh;overflow-y:auto">${formAddCands(list)}</div>`}
+        ${ghToken() ? '' : ghBlock()}`
     };
   },
   formReview() {
@@ -5427,7 +5539,38 @@ const actions = {
 
   // 採用薬リストの修正
   formReview: () => openPanel({ type: 'formReview' }),
-  formList: () => openPanel({ type: 'formList', q: '' }),
+  formList: () => openPanel({ type: 'formList', q: ui.panel?.type === 'formList' ? ui.panel.q : '' }),
+  formAdd: () => openPanel({ type: 'formAdd', q: '' }),
+  formAddPick: el => { const c = ui.panel.cands?.[+el.dataset.i]; if (!c) return; ui.panel.pick = c; ui.panel.name = c.form ? c.form.r : c.n; ui.panel.loc = c.form?.loc || ''; ui.panel.memo = c.form?.memo || ''; renderPanel(); },
+  formAddRe: () => { ui.panel.pick = null; ui.panel.msg = ''; renderPanel(); },
+  formAddGo: async () => {
+    const p = ui.panel, c = p.pick, name = ($('#faName')?.value || '').trim() || c.n;
+    p.name = name; p.loc = ($('#faLoc')?.value || '').trim(); p.memo = ($('#faMemo')?.value || '').trim();
+    if (!ghToken()) { p.msg = '先に下の「GitHubへの書き込み設定」でトークンを入れてください'; renderPanel(); return; }
+    p.busy = true; p.msg = ''; renderPanel();
+    try {
+      await formEdit({ op: '追加', r: name, y: c.y, n: c.n, loc: p.loc, memo: p.memo });
+      openPanel({ type: 'formList', q: '', msg: `「${name}」を追加しました。この端末ではすぐ使えます。全端末への反映は2〜3分後です。` });
+    } catch (e) { p.busy = false; p.msg = '追加できませんでした：' + (e.message || e); renderPanel(); }
+  },
+  formDel: el => { ui.panel.del = el.dataset.r; ui.panel.msg = ''; renderPanel(); },
+  formDelNo: () => { ui.panel.del = null; renderPanel(); },
+  formDelGo: async el => {
+    const p = ui.panel, r = el.dataset.r;
+    if (!ghToken()) { p.del = null; p.msg = '先に下の「GitHubへの書き込み設定」でトークンを入れてください'; p.err = true; renderPanel(); return; }
+    el.disabled = true; el.textContent = '書き込み中…';
+    try {
+      await formEdit({ op: '削除', r });
+      Object.assign(p, { del: null, err: false, msg: `「${r}」を採用薬から外しました。全端末への反映は2〜3分後です。間違えたときは「＋ 採用薬を追加」で戻せます。` });
+    } catch (e) { Object.assign(p, { del: null, err: true, msg: '外せませんでした：' + (e.message || e) }); }
+    renderPanel();
+  },
+  ghTokSave: () => {
+    const v = ($('#ghTok')?.value || '').replace(/[\s\u200B-\u200D\uFEFF\u00A0]/g, '');
+    try { if (v) localStorage.setItem('jishiyaku.ghtoken', v); } catch (e) {}
+    ui.panel.msg = v ? 'トークンを保存しました' : ''; ui.panel.err = false; renderPanel();
+  },
+  ghTokDel: () => { try { localStorage.removeItem('jishiyaku.ghtoken'); } catch (e) {} ui.panel.msg = 'トークンをこの端末から消しました'; renderPanel(); },
   formFixPick: el => {
     const r = Form.items[+el.dataset.i], c = (Form.fixCands || [])[+el.dataset.k]; if (!r || !c) return;
     Form.fixes = Form.fixes.filter(f => f.r !== r.r).concat([{ r: r.r, y: c.y, n: c.n }]);
@@ -5744,6 +5887,11 @@ document.addEventListener('input', e => {
     const n = box?.previousElementSibling; if (n) n.textContent = rows.length.toLocaleString() + '品目';
     return;
   }
+  if (t.id === 'faQ' && ui.panel?.type === 'formAdd') {
+    ui.panel.q = t.value;
+    const box = $('#faCands'); if (box) { box.innerHTML = formAddCands(t.value.trim().length >= 2 ? masterPrefix(t.value, 'tag') : []); box.scrollTop = 0; }
+    return;
+  }
   if (t.classList?.contains('formFixQ')) {
     const i = +t.dataset.i, list = masterPrefix(t.value).slice(0, 60);
     Form.fixCands = list;
@@ -5913,7 +6061,7 @@ idbGet('master').then(m => {
   if (s && s.items) { Supply.items = s.items; Supply.byY9 = null; Supply.meta = s.meta; if (s.codes) Supply.codes = s.codes; }
   return idbGet('formulary');
 }).then(f => {
-  if (f && f.items) { Form.items = f.items; Form.meta = f.meta; applyLocalFixes(); buildFormIndex(); }
+  if (f && f.items) { Form.base = f.items; Form.meta = f.meta; formRebuild(); }
   renderMain(); if (ui.panel) renderPanel();
   pullMaster(false);   // サーバーに新しいマスター・供給状況があれば取得（GitHub Pages版のみ）
 });

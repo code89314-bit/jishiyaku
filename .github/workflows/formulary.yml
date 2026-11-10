@@ -1,0 +1,39 @@
+name: 採用薬リストを更新
+
+# アプリで採用薬を足した・引いたとき（formulary-edits.csv が変わったとき）に、
+# 採用薬リスト（formulary.json）だけを作り直します。厚労省のデータは取りに行きません。
+on:
+  push:
+    paths:
+      - 'formulary-edits.csv'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-master
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pandas openpyxl xlrd rapidfuzz
+      - name: 採用薬リストを作り直す
+        run: python tools/build_master.py --formulary
+      - name: 変更をコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add formulary.json master-meta.json
+          if git diff --cached --quiet; then
+            echo "変更はありません"
+          else
+            git commit -m "採用薬リストを更新 ($(TZ=Asia/Tokyo date +%Y-%m-%d))"
+            git pull --rebase
+            git push
+          fi
