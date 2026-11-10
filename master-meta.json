@@ -34,13 +34,13 @@
   ]
  },
  "formulary": {
-  "version": "0ecbef1ca132",
+  "version": "7d1940932b07",
   "date": "2026/11/10",
-  "count": 543,
+  "count": 544,
   "counts": {
    "ok": 528,
    "fix": 15,
-   "add": 0,
+   "add": 1,
    "amb": 0,
    "check": 0,
    "none": 0
