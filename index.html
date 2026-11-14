@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-10 17:16';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-14 17:28';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -339,6 +339,10 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .frow .confirm { flex: 0 0 100%; }
 .frow .x { min-height: 36px; min-width: 36px; padding: 0; }
 .frow:first-child { border-top: 0; }
+.alt-l { display: block; flex-basis: 100%; font-size: 12.5px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+.alt-l.ok { color: var(--accent); font-weight: 700; }
+.alt-l .tag { margin-left: 3px; }
+.spot { border: 2px solid var(--accent); }
 .tbl-cands { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
@@ -4651,9 +4655,11 @@ const PANELS = {
       left: `<button class="btn ghost" data-act="close">閉じる</button>`,
       body: `
         <div class="block">
-          <h3>追加先</h3>
-          <div class="sizes">${names.map(n => `<button class="seg${p.clinic === n ? ' on' : ''}" data-act="addClinic" data-v="${esc(n)}" style="padding:0 10px">${esc(n)}</button>`).join('')}</div>
+          <div class="sizes" style="margin-bottom:8px"><button class="seg${p.spot ? '' : ' on'}" data-act="addSpot" data-v="0" style="padding:0 12px">一覧に追加する</button><button class="seg${p.spot ? ' on' : ''}" data-act="addSpot" data-v="1" style="padding:0 12px">調べるだけ</button></div>
+          ${p.spot ? '<p class="muted">選んだ薬を一覧に追加せず、院内採用・代替薬・供給状況だけを表示します。</p>' : `<h3>追加先</h3>
+          <div class="sizes">${names.map(n => `<button class="seg${p.clinic === n ? ' on' : ''}" data-act="addClinic" data-v="${esc(n)}" style="padding:0 10px">${esc(n)}</button>`).join('')}</div>`}
         </div>
+        ${p.spotItem ? spotBlock(p.spotItem) : ''}
         ${Master.ready ? '' : `<div class="block"><p class="warnline">医薬品マスターが未取り込みです</p><p class="muted">GS1コードと名前検索を使うには、メニュー →「医薬品マスター」で取り込んでください。名前の手入力は今でもできます。</p></div>`}
         ${canScanGS1() ? `<div class="block">
           <h3>PTPシートのGS1で探す</h3>
@@ -5222,10 +5228,27 @@ function usageBadge(text) {
     + u.flags.map(f => `<div class="rv-badge ng">⚠ ${esc(f)}</div>`).join('');
 }
 
+// 院内採用の目安を短く（追加画面の候補・スポットの調べもの用）
+function altLine(c) {
+  if (!Form.meta || !Form.items.length || !c?.y) return '';
+  const a = altFor({ name: c.n, yj: c.y });
+  if (!a || a.kind === 'unknown') return '';
+  const loc = r => r?.loc ? `<span class="tag loc">${esc(r.loc)}</span>` : '';
+  if (a.kind === 'same') {
+    const r = Form.byY.get(c.y) || (Form.by[9].get(c.y.slice(0, 9)) || [])[0];
+    return `<span class="alt-l ok">✓ 院内採用${loc(r)}</span>`;
+  }
+  if (a.cands?.length) {
+    const list = a.cands.slice(0, a.kind === 'similar' ? 5 : 3);
+    return `<span class="alt-l">${a.kind === 'similar' ? '採用なし・類似薬' : '院内代替'}：${list.map(x => `${esc(x.label)}${loc(x.r)}`).join('、')}${a.cands.length > list.length ? ` ほか${a.cands.length - list.length}件` : ''}</span>`;
+  }
+  return `<span class="alt-l ng">${esc(a.head ? a.head + ' ' : '')}${esc(a.text || '採用なし')}</span>`;
+}
 function candList(list, act) {
   if (!list || !list.length) return '<p class="muted">候補が見つかりません。名前の一部（例: アムロジピン 5）で検索してください。</p>';
   return `<div class="cands">${list.map((c, i) => `<button class="cand" data-act="${act}" data-i="${i}">
     <span class="cn">${esc(c.n)}</span><span class="cs">YJ ${esc(c.y || 'なし')} · 一致度 ${Math.round(c.sim * 100)}%</span>
+    ${act === 'addPick' ? altLine(c) : ''}
     ${supplyOfYJ(c.y)?.code > 1 ? `<span class="tags">${supplyTag(supplyOfYJ(c.y), true)}</span>` : ''}</button>`).join('')}</div>`;
 }
 const gs1Field = (act) => `
@@ -5272,6 +5295,25 @@ function altTag(d) {
   return `<span class="tag${a.kind === 'none' || a.needChoice ? ' warn' : ''}">${t}</span>`;
 }
 
+// 調べるだけ：選んだ薬の院内採用・代替薬・供給状況
+function spotBlock(it) {
+  const d = { name: it.n, yj: it.y };
+  const a = Form.meta ? altFor(d) : null;
+  const LABEL = { same: '院内採用あり', brand: '銘柄違い（先発／GE）', strength: '規格違い', form: '剤形違い', combo: '合剤', similar: '採用なし（類似薬）', none: '採用なし', unknown: '判定できません' };
+  const loc = r => r?.loc ? `<span class="tag loc">${esc(r.loc)}</span>` : '';
+  const self = it.y ? (Form.byY.get(it.y) || (Form.by[9].get(it.y.slice(0, 9)) || [])[0]) : null;
+  return `<div class="block spot" id="spotBlock">
+    <h3>${esc(it.n)}<small>YJ ${esc(it.y || 'なし')}</small></h3>
+    ${it.c || ingOf(it.y) ? `<p class="muted" style="margin:0 0 6px">成分：${esc(it.c || ingOf(it.y))}</p>` : ''}
+    ${!a ? '<p class="muted">採用薬リストがありません。</p>'
+      : a.kind === 'same' ? `<p class="okline">✓ 院内採用あり ${loc(self)}${self?.memo ? `<span class="muted" style="font-weight:400">　${esc(self.memo)}</span>` : ''}</p>`
+      : `<p class="warnline">${esc(LABEL[a.kind] || '')}${a.head ? '　' + esc(a.head) : ''}</p>
+         ${a.cands?.length ? `<div class="cands">${a.cands.map(x => `<div class="cand" style="cursor:default"><span class="cn">${esc(x.label)}${loc(x.r)}</span><span class="cs">${esc(ingOf(x.r.y))}${x.r.memo ? '・' + esc(x.r.memo) : ''}</span></div>`).join('')}</div>`
+           : `<p>${esc(a.text || '採用なし')}</p>`}`}
+    ${supplyBlock(supplyOfYJ(it.y))}
+    <button class="btn" data-act="spotAdd">この薬を一覧に追加する</button>
+  </div>`;
+}
 function altBlock(d) {
   if (!Form.meta) return window.JISHIYAKU_SITE ? `<div class="block"><h3>院内採用</h3><p class="muted">採用薬リストがまだありません。GitHubの formulary-src に棚表を置くと判定できます。</p></div>` : '';
   const a = altFor(d);
@@ -5650,7 +5692,13 @@ const actions = {
       save(); refresh();
     });
   },
-  scanGs1Add: () => { ui.note = ''; scanGS1((it, gtin) => addDrugFromMaster({ n: it.n, y: it.y || '' }, 1, gtin)); },
+  scanGs1Add: () => {
+    ui.note = '';
+    scanGS1((it, gtin) => {
+      if (ui.panel?.type === 'add' && ui.panel.spot) { ui.panel.spotItem = { n: it.n, y: it.y || '', c: it.c, sim: 1, gtin }; renderPanel(); setTimeout(() => $('#spotBlock')?.scrollIntoView({ block: 'start' }), 30); return; }
+      addDrugFromMaster({ n: it.n, y: it.y || '' }, 1, gtin);
+    });
+  },
 
   // 音声入力：入力欄にフォーカスしてキーボードを開く（マイクはキーボードのボタン）
   voice: el => {
@@ -5672,7 +5720,13 @@ const actions = {
     if (!it) { if (msg) msg.textContent = `マスターに該当する薬がありません（GS1 ${g}）。名前で探してください。`; inp.select(); return; }
     addDrugFromMaster({ n: it.n, y: it.y || '' }, 1, g);
   },
-  addPick: el => { const c = ui.panel.cands?.[+el.dataset.i]; if (c) addDrugFromMaster(c, c.sim); },
+  addPick: el => {
+    const c = ui.panel.cands?.[+el.dataset.i]; if (!c) return;
+    if (ui.panel.spot) { ui.panel.spotItem = c; renderPanel(); setTimeout(() => $('#spotBlock')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 30); return; }
+    addDrugFromMaster(c, c.sim);
+  },
+  addSpot: el => { ui.panel.spot = el.dataset.v === '1'; ui.panel.spotItem = null; renderPanel(); },
+  spotAdd: () => { const c = ui.panel.spotItem; if (!c) return; ui.panel.spot = false; addDrugFromMaster(c, c.sim ?? 1, c.gtin); },
   addManual: () => {
     const name = ($('#addSearch')?.value || '').trim();
     const d = newDrug(name);
