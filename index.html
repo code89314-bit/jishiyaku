@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-18 16:54';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-18 16:55';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -347,6 +347,10 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .exp-qty input { flex: 0 0 6em; font-size: 20px; font-weight: 700; text-align: right; }
 .exp-qty .btn { min-height: 44px; padding: 0 12px; }
 .exp-month { margin-top: 10px; }
+.exp-row-qty { display: flex; align-items: center; gap: 6px; flex-basis: 100%; }
+.exp-row-qty input { width: 4.2em; font: inherit; font-size: 16px; font-weight: 700; text-align: right; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.exp-row-qty span { font-size: 13px; color: var(--muted); min-width: 2em; }
+.exp-row-qty .btn { min-height: 36px; min-width: 36px; padding: 0; font-size: 18px; }
 .exp-month h4 { margin: 0 0 4px; font-size: 15px; padding: 4px 8px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); }
 .exp-month h4 small { margin-left: 6px; font-weight: 400; color: var(--muted); }
 .tbl-cands { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
@@ -4492,6 +4496,16 @@ function formRowsHTML(rows) {
       <button class="x" data-act="formDel" data-r="${esc(r.r)}" aria-label="採用薬から外す">✕</button>
     </div>`).join('') + (rows.length > 400 ? `<p class="muted">ほか ${rows.length - 400}件（絞り込んでください）</p>` : '');
 }
+// 手入力の名前から採用薬（棚番）を探す：棚表の表記・照合名の前方一致、なければマスター経由
+function expShelfHTML(name, cur) {
+  const q = (name || '').trim();
+  if (q.length < 2 || !Form.items.length) return '';
+  let rows = formFilter(q).filter(r => r.loc).slice(0, 4);
+  if (!rows.length) { const f = formOf(q); if (f?.loc) rows = [f]; }
+  if (!rows.length) return '<p class="muted" style="margin:4px 0 0">採用薬リストに見つかりません（棚番は手で入れてください）</p>';
+  EXP.shelf = rows;
+  return `<div class="chips" style="margin-top:6px">${rows.map((r, i) => `<button class="chip${cur === r.loc ? ' on' : ''}" data-act="expShelfPick" data-i="${i}">${esc(r.n ? shortName(r.n) : r.r)}<small>棚 ${esc(r.loc)}</small></button>`).join('')}</div>`;
+}
 function expCandHTML() {
   const q = (EXP.q || '').trim();
   if (q.length < 2) return '';
@@ -4933,7 +4947,8 @@ const PANELS = {
     const d = EXP.draft, months = expMonths(), groups = expGroups(), cam = canScanGS1();
     const editor = d ? `<div class="block spot" id="expEditor">
         <h3>${d.edit ? '期限切迫薬品を直す' : 'リストに追加'}${d.yj ? `<small>YJ ${esc(d.yj)}</small>` : ''}</h3>
-        <div class="field"><label for="expName">薬品名</label><input id="expName" value="${esc(d.name)}" autocomplete="off"></div>
+        <div class="field"><label for="expName">薬品名</label><input id="expName" value="${esc(d.name)}" autocomplete="off">
+          <div id="expShelf">${expShelfHTML(d.name, d.loc)}</div></div>
         <div class="field"><label for="expQty">数量</label>
           <div class="exp-qty"><input id="expQty" inputmode="decimal" value="${esc(d.qty)}" placeholder="0" autocomplete="off">
             <button class="btn" data-act="expQtyAdd" data-v="1">+1</button><button class="btn" data-act="expQtyAdd" data-v="10">+10</button>${d.sheet ? `<button class="btn" data-act="expQtyAdd" data-v="${d.sheet}">+1シート（${d.sheet}）</button>` : ''}<button class="btn ghost" data-act="expQtyAdd" data-v="0">0に</button></div>
@@ -4967,8 +4982,9 @@ const PANELS = {
           ${groups.map(([m, list]) => `<div class="exp-month"><h4>${expMonthLabel(m)}${m ? '期限' : ''}<small>${list.length}品目</small></h4>
             ${list.map(it => `<div class="frow"><div class="info" data-act="expEdit" data-id="${it.id}" role="button" tabindex="0" style="cursor:pointer">
               <div class="dname">${esc(it.name)}${it.loc ? `<span class="tag loc">${esc(it.loc)}</span>` : ''}</div>
-              <div class="sub"><b>${esc(it.qty || '?')}${esc(it.unit)}</b>${it.lot ? `　ロット ${esc(it.lot)}` : ''}</div></div>
-              <button class="x" data-act="expDel" data-id="${it.id}" aria-label="削除">✕</button></div>`).join('')}</div>`).join('')}
+              <div class="sub">${it.lot ? `ロット ${esc(it.lot)}・` : ''}名前をタップで全項目を直す</div></div>
+              <button class="x" data-act="expDel" data-id="${it.id}" aria-label="削除">✕</button>
+              <div class="exp-row-qty"><button class="btn" data-act="expQtyStep" data-id="${it.id}" data-v="-1" aria-label="1減らす">−</button><input data-expqty="${it.id}" inputmode="decimal" value="${esc(it.qty)}" aria-label="数量"><span>${esc(it.unit)}</span><button class="btn" data-act="expQtyStep" data-id="${it.id}" data-v="1" aria-label="1増やす">＋</button></div></div>`).join('')}</div>`).join('')}
           <p class="okline" role="status">${esc(EXP.msg || '')}</p>
           <div class="inline"><button class="btn primary" data-act="expCopy">まとめをコピー</button><button class="btn" data-act="expCsv">CSVを保存</button>${EXP.confirmClear ? `<button class="btn danger" data-act="expClearGo">本当に全部消す</button><button class="btn" data-act="expClearNo">やめる</button>` : `<button class="btn ghost danger" data-act="expClear">全部消す</button>`}</div>
           <details style="margin-top:8px"><summary class="muted">まとめの文を見る</summary><pre class="ins-out">${esc(expText())}</pre></details>
@@ -5880,7 +5896,14 @@ const actions = {
   expPanel: () => { EXP.draft = null; EXP.msg = ''; EXP.note = ''; ui.note = ''; openPanel({ type: 'exp' }); },
   expGs1: () => { ui.note = ''; scanGS1((it, gtin, raw) => { EXP.draft = expNew(it, gtin, raw); EXP.note = ''; if (ui.panel?.type !== 'exp') openPanel({ type: 'exp' }); else renderPanel(true); setTimeout(() => $('#expQty')?.focus(), 80); }); },
   expPick: el => { const c = EXP.cands?.[+el.dataset.i]; if (!c) return; EXP.draft = expNew(c); EXP.note = ''; renderPanel(true); setTimeout(() => $('#expQty')?.focus(), 80); },
-  expManual: () => { EXP.draft = expNew({ n: ($('#expSearch')?.value || '').trim() }); EXP.note = ''; renderPanel(true); setTimeout(() => $(EXP.draft.name ? '#expQty' : '#expName')?.focus(), 80); },
+  expShelfPick: el => { const r = EXP.shelf?.[+el.dataset.i]; if (!r) return; expReadDraft(); EXP.draft.loc = r.loc; if (r.y && !EXP.draft.yj) EXP.draft.yj = r.y; renderPanel(); },
+  expQtyStep: el => {
+    const it = EXP.items.find(x => x.id === el.dataset.id); if (!it) return;
+    it.qty = String(Math.max(0, (parseFloat(it.qty) || 0) + +el.dataset.v)); expSave();
+    const i = document.querySelector(`input[data-expqty="${it.id}"]`); if (i) i.value = it.qty;
+  },
+  expManual: () => { EXP.draft = expNew({ n: ($('#expSearch')?.value || '').trim() }); EXP.note = '';
+    if (!EXP.draft.loc && EXP.draft.name) { const r = formFilter(EXP.draft.name).filter(x => x.loc); if (r.length === 1) EXP.draft.loc = r[0].loc; } renderPanel(true); setTimeout(() => $(EXP.draft.name ? '#expQty' : '#expName')?.focus(), 80); },
   expQtyAdd: el => { const i = $('#expQty'); if (!i) return; const v = +el.dataset.v; i.value = v ? String((parseFloat(i.value) || 0) + v) : '0'; },
   expUnit: el => { expReadDraft(); EXP.draft.unit = el.dataset.v; renderPanel(); },
   expMonth: el => { expReadDraft(); EXP.draft.month = el.dataset.v; EXP.draft.fromGs1 = false; const o = $('#expMonthOther'); if (o) o.value = ''; renderPanel(); },
@@ -6103,6 +6126,15 @@ document.addEventListener('input', e => {
     const rows = formFilter(t.value);
     const box = $('#formRows'); if (box) box.innerHTML = formRowsHTML(rows);
     const n = box?.previousElementSibling; if (n) n.textContent = rows.length.toLocaleString() + '品目';
+    return;
+  }
+  if (t.id === 'expName' && ui.panel?.type === 'exp' && EXP.draft) {
+    const box = $('#expShelf'); if (box) box.innerHTML = expShelfHTML(t.value, ($('#expLoc')?.value || '').trim());
+    return;
+  }
+  if (t.dataset?.expqty) {
+    const it = EXP.items.find(x => x.id === t.dataset.expqty);
+    if (it && t.value.trim() !== '' && isFinite(parseFloat(t.value))) { it.qty = String(parseFloat(t.value)); expSave(); }
     return;
   }
   if (t.id === 'expSearch' && ui.panel?.type === 'exp') {
