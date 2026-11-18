@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-14 17:28';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-18 16:54';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -343,6 +343,12 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .alt-l.ok { color: var(--accent); font-weight: 700; }
 .alt-l .tag { margin-left: 3px; }
 .spot { border: 2px solid var(--accent); }
+.exp-qty { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.exp-qty input { flex: 0 0 6em; font-size: 20px; font-weight: 700; text-align: right; }
+.exp-qty .btn { min-height: 44px; padding: 0 12px; }
+.exp-month { margin-top: 10px; }
+.exp-month h4 { margin: 0 0 4px; font-size: 15px; padding: 4px 8px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); }
+.exp-month h4 small { margin-left: 6px; font-weight: 400; color: var(--muted); }
 .tbl-cands { max-height: 50vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
 .ins-out { font-family: inherit; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; line-height: 1.6; margin: 0 0 8px; user-select: text; -webkit-user-select: text; }
 .okline { margin: 0; color: var(--accent); font-weight: 700; overflow-wrap: anywhere; }
@@ -2102,6 +2108,58 @@ function saveFile(name, text, type) {
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 const ymd = () => { const d = new Date(); return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`; };
+
+/* ---- 期限切迫薬品リスト：GS1・名前・手入力で追加 → 数量と期限（向こう6か月）→ 月ごとにまとめる ---- */
+const EXP = (() => { let o = {}; try { o = JSON.parse(localStorage.getItem('jishiyaku.exp') || '{}'); } catch (e) {} return { items: o.items || [], draft: null, note: '', cands: null }; })();
+const expSave = () => { try { localStorage.setItem('jishiyaku.exp', JSON.stringify({ items: EXP.items })); } catch (e) {} };
+const EXP_UNITS = ['錠', 'カプセル', '包', '本', '枚', '個', '瓶', '箱', 'シート', 'mL', 'g'];
+function expMonths() {
+  const d = new Date(), out = [];
+  for (let i = 0; i < 6; i++) { const t = new Date(d.getFullYear(), d.getMonth() + i, 1); out.push(`${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}`); }
+  return out;
+}
+const expMonthLabel = ym => { const m = String(ym || '').match(/^(\d{4})-(\d{2})$/); return m ? `${+m[1]}年${+m[2]}月` : '期限未入力'; };
+function expUnitGuess(n) {
+  const w = formWord(n);
+  return /錠/.test(w) ? '錠' : w === 'カプセル' ? 'カプセル' : /散|細粒|顆粒|DS/.test(w) ? '包' : /テープ|パップ/.test(w) ? '枚' : /軟膏|クリーム|点眼|注射|吸入|ローション|液|シロップ/.test(w) ? '本' : w === '坐剤' ? '個' : '錠';
+}
+function expNew(it, gtin, raw) {
+  const ex = gtin ? parseGS1Extra(raw) : {};
+  const f = it.y || it.n ? formOf(it.n, it.y) : null;
+  return { id: uid(), name: it.n || '', yj: it.y || '', gtin: gtin || '', qty: '', unit: expUnitGuess(it.n || ''), month: ex.month || '', lot: ex.lot || '', loc: f?.loc || '', sheet: gtin ? sheetFromGS1(gtin) : 0, fromGs1: !!ex.month };
+}
+function expReadDraft() {
+  const d = EXP.draft; if (!d) return;
+  const v = id => $('#' + id)?.value;
+  if (v('expName') != null) d.name = v('expName').trim();
+  if (v('expQty') != null) d.qty = v('expQty').trim();
+  if (v('expLot') != null) d.lot = v('expLot').trim();
+  if (v('expLoc') != null) d.loc = v('expLoc').trim();
+  if (v('expMonthOther')) d.month = v('expMonthOther');
+}
+function expGroups() {
+  const g = new Map();
+  for (const it of [...EXP.items].sort((a, b) => (a.month || '9999').localeCompare(b.month || '9999') || a.name.localeCompare(b.name, 'ja'))) {
+    const k = it.month || '';
+    if (!g.has(k)) g.set(k, []);
+    g.get(k).push(it);
+  }
+  return [...g.entries()];
+}
+function expText() {
+  const d = new Date(), out = [`【期限切迫薬品】${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} 作成`];
+  for (const [m, list] of expGroups()) {
+    out.push('', `■${expMonthLabel(m)}${m ? '期限' : ''}（${list.length}品目）`);
+    for (const it of list) out.push(`・${it.name}　${it.qty || '?'}${it.unit}${it.lot ? `（ロット ${it.lot}）` : ''}${it.loc ? `［${it.loc}］` : ''}`);
+  }
+  return out.join('\n');
+}
+function expCSV() {
+  const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const rows = [['期限（年月）', '薬品名', '数量', '単位', 'ロット', '棚番', 'YJコード', 'GS1コード']];
+  for (const [m, list] of expGroups()) for (const it of list) rows.push([m, it.name, it.qty, it.unit, it.lot, it.loc, it.yj, it.gtin]);
+  return rows.map(r => r.map(q).join(',')).join('\r\n');
+}
 // CSV：薬品名の列の後ろに「YJコード」「照合」を足す（設定でオン・オフ）
 function tblCSV() {
   const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
@@ -2148,7 +2206,7 @@ async function scanTick() {
       if (!gtin) continue;
       const it = lookupGS1(gtin);
       try { navigator.vibrate?.(40); } catch (e) {}
-      if (it) { const f = BC.onFound; camClose(); f && f(it, gtin); return; }
+      if (it) { const f = BC.onFound; camClose(); f && f(it, gtin, r.text); return; }
       $('#camMsg').textContent = `GS1 ${gtin} はマスターにありません。別の面を映すか、名前で探してください。`;
     }
   } catch (e) { console.error(e); }
@@ -3073,6 +3131,26 @@ function parseGS1(raw) {
   if (/^\d{14}$/.test(d)) return d;
   if (/^\d{13}$/.test(d)) return '0' + d;
   return null;
+}
+// GS1の期限（AI 17：YYMMDD）とロット（AI 10）。箱（販売包装単位）のバーコードに入っていることが多い
+function parseGS1Extra(raw) {
+  const s = (raw || '').normalize('NFKC').replace(/\x1d/g, '|');
+  const out = {};
+  if (/\(\d{2}\)/.test(s)) {
+    const m17 = s.match(/\(17\)\s*(\d{6})/), m10 = s.match(/\(10\)\s*([^\s(|]+)/);
+    if (m17) out.exp = m17[1]; if (m10) out.lot = m10[1];
+  } else {
+    let t = s.replace(/[^\dA-Za-z|\-]/g, ''), p = t.indexOf('01') === 0 || t.indexOf('|01') === 0 ? t.indexOf('01') + 16 : -1;
+    while (p >= 0 && p < t.length) {
+      if (t[p] === '|') { p++; continue; }
+      const ai = t.substr(p, 2);
+      if (['17', '11', '15'].includes(ai)) { if (ai === '17') out.exp = t.substr(p + 2, 6); p += 8; }
+      else if (['10', '21'].includes(ai)) { let e = t.indexOf('|', p + 2); if (e < 0) e = t.length; if (ai === '10') out.lot = t.slice(p + 2, e); p = e; }
+      else break;
+    }
+  }
+  if (out.exp && /^\d{6}$/.test(out.exp)) { const y = 2000 + +out.exp.slice(0, 2), m = +out.exp.slice(2, 4); out.month = m >= 1 && m <= 12 ? `${y}-${String(m).padStart(2, '0')}` : ''; }
+  return out;
 }
 // 調剤包装単位の名称（例「PTP 14錠」）から1シートの錠数を取り出す
 function sheetFromGS1(g) {
@@ -4414,6 +4492,14 @@ function formRowsHTML(rows) {
       <button class="x" data-act="formDel" data-r="${esc(r.r)}" aria-label="採用薬から外す">✕</button>
     </div>`).join('') + (rows.length > 400 ? `<p class="muted">ほか ${rows.length - 400}件（絞り込んでください）</p>` : '');
 }
+function expCandHTML() {
+  const q = (EXP.q || '').trim();
+  if (q.length < 2) return '';
+  let list = masterPrefix(q, 'tag');
+  if (!list.length) list = searchMaster(q, 10, true);
+  EXP.cands = list;
+  return list.slice(0, 80).map((c, i) => `<button class="cand" data-act="expPick" data-i="${i}"><span class="cn">${esc(c.n)}</span>${c.form ? `<span class="tag loc">採用${c.form.loc ? ' ' + esc(c.form.loc) : ''}</span>` : ''}${c.prefix ? '' : `<span class="cs">一致度 ${Math.round(c.sim * 100)}%</span>`}</button>`).join('') || '<p class="muted">見つかりません</p>';
+}
 function formAddCands(list) {
   if (ui.panel) ui.panel.cands = list;
   return list.slice(0, 80).map((c, i) => `<button class="cand" data-act="formAddPick" data-i="${i}"><span class="cn">${esc(c.n)}</span>${c.form ? `<span class="tag loc">採用${c.form.loc ? ' ' + esc(c.form.loc) : ''}</span>` : `<span class="cs">YJ ${esc((c.y || '').slice(0, 9))}</span>`}</button>`).join('')
@@ -4843,6 +4929,53 @@ const PANELS = {
 
 
 
+  exp() {
+    const d = EXP.draft, months = expMonths(), groups = expGroups(), cam = canScanGS1();
+    const editor = d ? `<div class="block spot" id="expEditor">
+        <h3>${d.edit ? '期限切迫薬品を直す' : 'リストに追加'}${d.yj ? `<small>YJ ${esc(d.yj)}</small>` : ''}</h3>
+        <div class="field"><label for="expName">薬品名</label><input id="expName" value="${esc(d.name)}" autocomplete="off"></div>
+        <div class="field"><label for="expQty">数量</label>
+          <div class="exp-qty"><input id="expQty" inputmode="decimal" value="${esc(d.qty)}" placeholder="0" autocomplete="off">
+            <button class="btn" data-act="expQtyAdd" data-v="1">+1</button><button class="btn" data-act="expQtyAdd" data-v="10">+10</button>${d.sheet ? `<button class="btn" data-act="expQtyAdd" data-v="${d.sheet}">+1シート（${d.sheet}）</button>` : ''}<button class="btn ghost" data-act="expQtyAdd" data-v="0">0に</button></div>
+          <div class="sizes" style="margin-top:6px">${EXP_UNITS.map(u => `<button class="seg${d.unit === u ? ' on' : ''}" data-act="expUnit" data-v="${u}" style="padding:0 10px">${u}</button>`).join('')}</div></div>
+        <div class="field"><label>期限${d.fromGs1 ? '<small>バーコードから読み取り</small>' : ''}</label>
+          <div class="sizes">${months.map(m => `<button class="seg${d.month === m ? ' on' : ''}" data-act="expMonth" data-v="${m}" style="padding:0 10px">${expMonthLabel(m).replace(/^\d{4}年/, m.slice(0, 4) === months[0].slice(0, 4) ? '' : m.slice(2, 4) + '年')}</button>`).join('')}</div>
+          ${d.month && !months.includes(d.month) ? `<p class="warnline" style="margin-top:6px">${expMonthLabel(d.month)}（向こう6か月より先）</p>` : ''}
+          <details style="margin-top:6px"><summary class="muted">ほかの月を入れる</summary><input type="month" id="expMonthOther" value="${esc(d.month)}"></details></div>
+        <div class="field"><label for="expLot">ロット（空欄可）</label><input id="expLot" value="${esc(d.lot)}" autocomplete="off" autocorrect="off" spellcheck="false"></div>
+        <div class="field"><label for="expLoc">棚番（空欄可）</label><input id="expLoc" value="${esc(d.loc)}" autocomplete="off"></div>
+        ${EXP.note ? `<p class="warnline" role="status">${esc(EXP.note)}</p>` : ''}
+        <div class="inline"><button class="btn primary" data-act="expSaveItem">${d.edit ? '直す' : 'リストに追加'}</button><button class="btn" data-act="expCancel">やめる</button></div>
+      </div>` : '';
+    const total = EXP.items.length;
+    return {
+      title: '期限切迫薬品リスト',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        ${editor}
+        ${d ? '' : `<div class="block">
+          <h3>薬を追加</h3>
+          ${cam ? `<button class="btn primary" data-act="expGs1" style="min-height:56px;font-size:17px;width:100%">GS1をカメラで読む（無音）</button>
+          <p class="muted">箱のバーコードなら期限とロットも自動で入ります（PTPシートのバーコードは薬だけ）。</p>` : ''}
+          ${ui.note ? `<p class="warnline" role="status">${esc(ui.note)}</p>` : ''}
+          <div class="field"><label for="expSearch">薬品名で探す（先頭の数字は規格）</label><input id="expSearch" value="${esc(EXP.q || '')}" placeholder="例：5アムロ、ろきそにん" autocomplete="off" autocorrect="off" spellcheck="false"></div>
+          <div class="cands" id="expCands" style="max-height:50vh;overflow-y:auto">${expCandHTML()}</div>
+          <button class="btn" data-act="expManual">見つからない場合：名前を手入力</button>
+        </div>`}
+        ${total ? `<div class="block">
+          <h3>月ごとのまとめ<small>${total}品目</small></h3>
+          ${groups.map(([m, list]) => `<div class="exp-month"><h4>${expMonthLabel(m)}${m ? '期限' : ''}<small>${list.length}品目</small></h4>
+            ${list.map(it => `<div class="frow"><div class="info" data-act="expEdit" data-id="${it.id}" role="button" tabindex="0" style="cursor:pointer">
+              <div class="dname">${esc(it.name)}${it.loc ? `<span class="tag loc">${esc(it.loc)}</span>` : ''}</div>
+              <div class="sub"><b>${esc(it.qty || '?')}${esc(it.unit)}</b>${it.lot ? `　ロット ${esc(it.lot)}` : ''}</div></div>
+              <button class="x" data-act="expDel" data-id="${it.id}" aria-label="削除">✕</button></div>`).join('')}</div>`).join('')}
+          <p class="okline" role="status">${esc(EXP.msg || '')}</p>
+          <div class="inline"><button class="btn primary" data-act="expCopy">まとめをコピー</button><button class="btn" data-act="expCsv">CSVを保存</button>${EXP.confirmClear ? `<button class="btn danger" data-act="expClearGo">本当に全部消す</button><button class="btn" data-act="expClearNo">やめる</button>` : `<button class="btn ghost danger" data-act="expClear">全部消す</button>`}</div>
+          <details style="margin-top:8px"><summary class="muted">まとめの文を見る</summary><pre class="ins-out">${esc(expText())}</pre></details>
+        </div>` : ''}`
+    };
+  },
+
   kyu() {
     const cam = canScanGS1(), rows = KYU.rows, inp = (i, k, v, extra = '') => `<input class="kyu-in" data-kyu="${i}|${k}" value="${esc(v || '')}"${extra}>`;
     return {
@@ -5167,6 +5300,7 @@ const PANELS = {
           <button class="btn primary" data-act="rptPanel">持参薬レポートを読む（服用開始・一包化）</button>
           <button class="btn" data-act="tblPanel">薬品リスト（表）を読む → CSV</button>
           <button class="btn" data-act="kyuPanel">医師の休診日を読む → CSV・JSON</button>
+          <button class="btn" data-act="expPanel">期限切迫薬品リスト（${EXP.items.length}品目）</button>
           <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
           <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
           ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="ocrPanel">端末内の読み取り（${ocrEngine() === 'ndl' ? 'NDLOCR-Lite' : 'Tesseract'}）</button>` : ''}
@@ -5743,6 +5877,36 @@ const actions = {
   rptCam: () => camOpen('rpt'),
   tblPanel: () => { TBL.note = ''; openPanel({ type: 'tbl' }); },
   kyuPanel: () => { KYU.note = ''; openPanel({ type: 'kyu' }); },
+  expPanel: () => { EXP.draft = null; EXP.msg = ''; EXP.note = ''; ui.note = ''; openPanel({ type: 'exp' }); },
+  expGs1: () => { ui.note = ''; scanGS1((it, gtin, raw) => { EXP.draft = expNew(it, gtin, raw); EXP.note = ''; if (ui.panel?.type !== 'exp') openPanel({ type: 'exp' }); else renderPanel(true); setTimeout(() => $('#expQty')?.focus(), 80); }); },
+  expPick: el => { const c = EXP.cands?.[+el.dataset.i]; if (!c) return; EXP.draft = expNew(c); EXP.note = ''; renderPanel(true); setTimeout(() => $('#expQty')?.focus(), 80); },
+  expManual: () => { EXP.draft = expNew({ n: ($('#expSearch')?.value || '').trim() }); EXP.note = ''; renderPanel(true); setTimeout(() => $(EXP.draft.name ? '#expQty' : '#expName')?.focus(), 80); },
+  expQtyAdd: el => { const i = $('#expQty'); if (!i) return; const v = +el.dataset.v; i.value = v ? String((parseFloat(i.value) || 0) + v) : '0'; },
+  expUnit: el => { expReadDraft(); EXP.draft.unit = el.dataset.v; renderPanel(); },
+  expMonth: el => { expReadDraft(); EXP.draft.month = el.dataset.v; EXP.draft.fromGs1 = false; const o = $('#expMonthOther'); if (o) o.value = ''; renderPanel(); },
+  expCancel: () => { EXP.draft = null; EXP.note = ''; renderPanel(true); },
+  expSaveItem: () => {
+    expReadDraft();
+    const d = EXP.draft;
+    if (!d.name) { EXP.note = '薬品名を入れてください'; renderPanel(); return; }
+    if (!d.month) { EXP.note = '期限の月を選んでください'; renderPanel(); return; }
+    if (!(parseFloat(d.qty) > 0)) { EXP.note = '数量を入れてください'; renderPanel(); return; }
+    const rec = { id: d.id, name: d.name, yj: d.yj, gtin: d.gtin, qty: String(parseFloat(d.qty)), unit: d.unit, month: d.month, lot: d.lot, loc: d.loc };
+    if (d.edit) { const i = EXP.items.findIndex(x => x.id === d.id); if (i >= 0) EXP.items[i] = rec; EXP.msg = `「${d.name}」を直しました`; }
+    else {
+      const same = EXP.items.find(x => x.name === rec.name && x.month === rec.month && x.lot === rec.lot && x.unit === rec.unit);
+      if (same) { same.qty = String(parseFloat(same.qty) + parseFloat(rec.qty)); EXP.msg = `「${d.name}」（${expMonthLabel(d.month)}）はリストにあったので、数量を足しました（計${same.qty}${same.unit}）`; }
+      else { EXP.items.push(rec); EXP.msg = `「${d.name}」を${expMonthLabel(d.month)}期限で追加しました`; }
+    }
+    expSave(); EXP.draft = null; EXP.note = ''; EXP.q = ''; renderPanel(true);
+  },
+  expEdit: el => { const it = EXP.items.find(x => x.id === el.dataset.id); if (!it) return; EXP.draft = { ...it, edit: true, sheet: it.gtin ? sheetFromGS1(it.gtin) : 0 }; EXP.note = ''; renderPanel(true); },
+  expDel: el => { EXP.items = EXP.items.filter(x => x.id !== el.dataset.id); expSave(); renderPanel(); },
+  expClear: () => { EXP.confirmClear = true; renderPanel(); },
+  expClearNo: () => { EXP.confirmClear = false; renderPanel(); },
+  expClearGo: () => { EXP.items = []; EXP.confirmClear = false; EXP.msg = ''; expSave(); renderPanel(); },
+  expCopy: async () => { try { await navigator.clipboard.writeText(expText()); EXP.msg = 'まとめをコピーしました'; } catch (e) { EXP.msg = 'コピーできませんでした。「まとめの文を見る」から長押しで選択してください'; } renderPanel(); },
+  expCsv: () => { saveFile(`期限切迫薬品_${ymd()}.csv`, '﻿' + expCSV(), 'text/csv;charset=utf-8'); EXP.msg = 'CSVを保存しました（Excelで開ける形式・UTF-8）'; renderPanel(); },
   kyuCam: () => camOpen('kyu'),
   kyuDel: el => { KYU.rows.splice(+el.dataset.i, 1); kyuSave(); renderPanel(); },
   kyuAddRow: () => { const last = KYU.rows[KYU.rows.length - 1]; KYU.rows.push({ date: last?.date || isoOf(new Date().getFullYear(), new Date().getMonth() + 1, new Date().getDate()), doctor: '', dept: last?.dept || '', time: '終日', kind: '休診', sub: '', note: '' }); kyuSave(); renderPanel(); },
@@ -5939,6 +6103,11 @@ document.addEventListener('input', e => {
     const rows = formFilter(t.value);
     const box = $('#formRows'); if (box) box.innerHTML = formRowsHTML(rows);
     const n = box?.previousElementSibling; if (n) n.textContent = rows.length.toLocaleString() + '品目';
+    return;
+  }
+  if (t.id === 'expSearch' && ui.panel?.type === 'exp') {
+    EXP.q = t.value;
+    const box = $('#expCands'); if (box) { box.innerHTML = expCandHTML(); box.scrollTop = 0; }
     return;
   }
   if (t.id === 'faQ' && ui.panel?.type === 'formAdd') {
