@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ja"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="持参薬鑑別">
@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-18 16:55';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-18 17:00';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -66,7 +66,7 @@ body::before {
 }
 button, input, textarea { font: inherit; color: inherit; }
 button { touch-action: manipulation; -webkit-user-select: none; user-select: none; cursor: pointer; }
-input, textarea { font-size: 16px; }
+input, textarea, select { font-size: 16px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .num, .tab { font-variant-numeric: tabular-nums; }
 
@@ -320,7 +320,7 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .tbl td.th { font-weight: 700; background: var(--bg); }
 .tbl.kyu td { padding: 2px; max-width: none; cursor: default; }
 .tbl.kyu td.th { padding: 5px 6px; }
-.kyu-in { font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--ink); padding: 6px 4px; min-height: 32px; box-sizing: border-box; }
+.kyu-in { font: inherit; font-size: 16px; border: 0; background: transparent; color: var(--ink); padding: 6px 4px; min-height: 32px; box-sizing: border-box; }
 .kyu-in:focus { outline: 2px solid var(--accent); border-radius: 4px; }
 .kyu-wd { text-align: center; padding: 0 6px !important; }
 .kyu-wd.we { color: var(--warn); font-weight: 700; }
@@ -525,6 +525,21 @@ const fmtTime = t => new Date(t).toLocaleString('ja-JP', { month: 'numeric', day
 const drugCount = st => (st.clinics || []).reduce((a, c) => a + c.drugs.length, 0);
 
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
+/* iPhone（ホーム画面のアプリ）でキーボードを閉じたあと、画面が上にずれたまま戻らず、
+   タップした位置と反応する位置がずれることがある。全画面の画面（パネル・カメラ）が開いているときは、
+   キーボードが閉じたらページのずれを0に戻す */
+(() => {
+  const fixedOpen = () => document.body.classList.contains('locked') || (document.getElementById('cam') && !document.getElementById('cam').hidden);
+  const reset = () => {
+    if (!fixedOpen()) return;
+    const a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !/^(button|checkbox|radio|file)$/.test(a.type)) return;   // まだ入力中
+    if (window.scrollY || document.documentElement.scrollTop || document.body.scrollTop) { window.scrollTo(0, 0); document.documentElement.scrollTop = 0; document.body.scrollTop = 0; }
+  };
+  document.addEventListener('focusout', () => setTimeout(reset, 60), true);
+  window.visualViewport?.addEventListener('resize', () => setTimeout(reset, 60));
+  window.addEventListener('scroll', () => { if (fixedOpen() && !document.activeElement?.matches?.('input,textarea,select')) setTimeout(reset, 120); }, { passive: true });
+})();
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const qty = n => String(Math.round(n * 100) / 100);
 const $ = s => document.querySelector(s);
