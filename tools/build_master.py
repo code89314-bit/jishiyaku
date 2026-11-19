@@ -653,10 +653,16 @@ def build_formulary(items):
             else:
                 rec = {'r': name}
                 out.append(rec)
-            if loc:
-                rec['loc'] = loc
+            if loc:                                 # 「なし」は消す
+                if loc == 'なし':
+                    rec.pop('loc', None)
+                else:
+                    rec['loc'] = loc
             if memo:
-                rec['memo'] = memo
+                if memo == 'なし':
+                    rec.pop('memo', None)
+                else:
+                    rec['memo'] = memo
             if YJ_RE.fullmatch(code):
                 it = by_y.get(code) or next((g for g in items if (g.get('y') or '')[:9] == code[:9]), None)
                 rec.update(y=code, n=it['n'] if it else name, s=100, st='add')

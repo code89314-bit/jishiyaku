@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-18 17:00';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 08:35';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -337,6 +337,7 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .frow { padding: 8px 2px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .frow .info { flex: 1; min-width: 0; }
 .frow .confirm { flex: 0 0 100%; }
+.form-edit { display: grid; gap: 8px; }
 .frow .x { min-height: 36px; min-width: 36px; padding: 0; }
 .frow:first-child { border-top: 0; }
 .alt-l { display: block; flex-basis: 100%; font-size: 12.5px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
@@ -3399,15 +3400,16 @@ function applyPending() {
   FORM_PENDING = FORM_PENDING.filter(e => {
     const x = has(e.r);
     if (e.op === '削除') return !!x;
-    return !(x && (!e.y || x.y === e.y) && (!e.loc || x.loc === e.loc));
+    const want = v => v === 'なし' ? undefined : v;
+    return !(x && (!e.y || x.y === e.y) && (!e.loc || x.loc === want(e.loc)) && (!e.memo || x.memo === want(e.memo)));
   });
   formPendingSave();
   for (const e of FORM_PENDING) {
     const i = Form.items.findIndex(x => fKey(x.r) === fKey(e.r));
     if (e.op === '削除') { if (i >= 0) Form.items.splice(i, 1); continue; }
     const rec = i >= 0 ? Form.items[i] : (Form.items.push({ r: e.r }), Form.items[Form.items.length - 1]);
-    if (e.loc) rec.loc = e.loc;
-    if (e.memo) rec.memo = e.memo;
+    if (e.loc) { if (e.loc === 'なし') delete rec.loc; else rec.loc = e.loc; }
+    if (e.memo) { if (e.memo === 'なし') delete rec.memo; else rec.memo = e.memo; }
     if (e.y) Object.assign(rec, { y: e.y, n: e.n || e.r, s: 100, st: 'add' });
     rec.pending = true;
   }
@@ -4506,7 +4508,13 @@ function formRowsHTML(rows) {
   return rows.slice(0, 400).map(r => `<div class="frow">
       ${del === r.r ? `<div class="confirm" style="margin-bottom:6px"><p>「${esc(r.n ? shortName(r.n) : r.r)}」を採用薬から外します（全端末）。</p>
         <div class="inline"><button class="btn danger" data-act="formDelGo" data-r="${esc(r.r)}">外す</button><button class="btn" data-act="formDelNo">やめる</button></div></div>` : ''}
-      <div class="info"><div class="dname">${esc(r.n ? shortName(r.n) : r.r)}${r.loc ? `<span class="tag loc">${esc(r.loc)}</span>` : ''}</div>
+      ${ui.panel?.edit === r.r ? `<div class="confirm form-edit" style="margin-bottom:6px">
+          <p><b>${esc(r.n ? shortName(r.n) : r.r)}</b> の棚番・備考を直す（全端末）</p>
+          <div class="field"><label for="feLoc">棚番（空欄にすると棚番なし）</label><input id="feLoc" value="${esc(r.loc || '')}" list="feLocs" placeholder="例：A-2-d、冷蔵庫1" autocomplete="off"></div>
+          <datalist id="feLocs">${[...new Set(Form.items.map(x => x.loc).filter(Boolean))].sort().map(l => `<option value="${esc(l)}">`).join('')}</datalist>
+          <div class="field"><label for="feMemo">備考（空欄可）</label><input id="feMemo" value="${esc(r.memo || '')}" autocomplete="off"></div>
+          <div class="inline"><button class="btn primary" data-act="formEditGo" data-r="${esc(r.r)}">保存</button><button class="btn" data-act="formEditNo">やめる</button></div></div>` : ''}
+      <div class="info" data-act="formEditOpen" data-r="${esc(r.r)}" role="button" tabindex="0" style="cursor:pointer"><div class="dname">${esc(r.n ? shortName(r.n) : r.r)}${r.loc ? `<span class="tag loc">${esc(r.loc)}</span>` : '<span class="tag note">棚番なし</span>'}</div>
       <div class="sub">${r.n && shortName(r.n) !== r.r ? '棚表：' + esc(r.r) : ''}${r.memo ? `${r.n && shortName(r.n) !== r.r ? '・' : ''}${esc(r.memo)}` : ''}${['check', 'none'].includes(r.st) ? ' <span class="tag warn">' + (r.st === 'check' ? '要確認' : '該当なし') + '</span>' : ''}${r.st === 'add' ? ' <span class="tag note">追加</span>' : ''}${r.pending ? ' <span class="tag note">反映待ち</span>' : ''}</div></div>
       <button class="x" data-act="formDel" data-r="${esc(r.r)}" aria-label="採用薬から外す">✕</button>
     </div>`).join('') + (rows.length > 400 ? `<p class="muted">ほか ${rows.length - 400}件（絞り込んでください）</p>` : '');
@@ -4874,7 +4882,7 @@ const PANELS = {
       left: `<button class="btn ghost" data-act="masterPanel">‹ 戻る</button>`,
       body: `
         ${p.msg ? `<p class="${p.err ? 'warnline' : 'okline'}" role="status">${esc(p.msg)}</p>` : ''}
-        <div class="inline" style="margin-bottom:8px"><button class="btn primary" data-act="formAdd">＋ 採用薬を追加</button>${FORM_PENDING.length ? `<span class="muted">反映待ち ${FORM_PENDING.length}件（2〜3分で全端末に反映）</span>` : ''}</div>
+        <div class="inline" style="margin-bottom:8px"><button class="btn primary" data-act="formAdd">＋ 採用薬を追加</button><span class="muted">名前をタップで棚番・備考を直せます</span>${FORM_PENDING.length ? `<span class="muted">反映待ち ${FORM_PENDING.length}件（2〜3分で全端末に反映）</span>` : ''}</div>
         <div class="field"><label for="formQ">薬品名・棚番で探す（前方一致）</label><input id="formQ" value="${esc(q)}" placeholder="例：アムロ、5アムロ、A-2" autocomplete="off"></div>
         <p class="muted">${rows.length.toLocaleString()}品目・右の✕で採用薬から外せます</p>
         <div class="flist" id="formRows">${formRowsHTML(rows)}</div>
@@ -5760,7 +5768,23 @@ const actions = {
       openPanel({ type: 'formList', q: '', msg: `「${name}」を追加しました。この端末ではすぐ使えます。全端末への反映は2〜3分後です。` });
     } catch (e) { p.busy = false; p.msg = '追加できませんでした：' + (e.message || e); renderPanel(); }
   },
-  formDel: el => { ui.panel.del = el.dataset.r; ui.panel.msg = ''; renderPanel(); },
+  formEditOpen: el => { ui.panel.edit = ui.panel.edit === el.dataset.r ? null : el.dataset.r; ui.panel.del = null; ui.panel.msg = ''; renderPanel(); setTimeout(() => $('#feLoc')?.focus(), 50); },
+  formEditNo: () => { ui.panel.edit = null; renderPanel(); },
+  formEditGo: async el => {
+    const p = ui.panel, raw = el.dataset.r, r = Form.items.find(x => x.r === raw);
+    if (!r) return;
+    const loc = ($('#feLoc')?.value || '').trim(), memo = ($('#feMemo')?.value || '').trim();
+    if (loc === (r.loc || '') && memo === (r.memo || '')) { p.edit = null; renderPanel(); return; }
+    if (!ghToken()) { p.msg = '先に下の「GitHubへの書き込み設定」でトークンを入れてください'; p.err = true; renderPanel(); return; }
+    el.disabled = true; el.textContent = '書き込み中…';
+    try {
+      // 空欄にしたときは「なし」と書いて消す（空欄は「変えない」の意味になるため）
+      await formEdit({ op: '追加', r: raw, y: '', n: r.n || '', loc: loc || (r.loc ? 'なし' : ''), memo: memo || (r.memo ? 'なし' : '') });
+      Object.assign(p, { edit: null, err: false, msg: `「${shortName(r.n || raw)}」の棚番を${loc || 'なし'}にしました。全端末への反映は2〜3分後です。` });
+    } catch (e) { Object.assign(p, { err: true, msg: '保存できませんでした：' + (e.message || e) }); }
+    renderPanel();
+  },
+  formDel: el => { ui.panel.del = el.dataset.r; ui.panel.edit = null; ui.panel.msg = ''; renderPanel(); },
   formDelNo: () => { ui.panel.del = null; renderPanel(); },
   formDelGo: async el => {
     const p = ui.panel, r = el.dataset.r;
