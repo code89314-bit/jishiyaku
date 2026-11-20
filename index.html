@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 12:34';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 12:46';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -1771,7 +1771,7 @@ async function tblOcr(src, onStatus = () => {}) {
   return { rows, grid };
 }
 
-try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a), searchMaster: (...a) => searchMaster(...a), report: () => actions.report(), state: () => state, kyu: j => { kyuAdd(kyuRowsFromLLM(j)); openPanel({ type: 'kyu' }); return kyuCSV() + '\n' + kyuJSON().slice(0, 300); }, review: t => openPanel({ type: "review", review: makeReview(t) }), norm: (q, l) => l ? normSpoken(q) : normName(q) }; } catch (e) {}
+try { window.__tbl = { tblFindGrid, tblOcr: (...a) => tblOcr(...a), tblOcrWhole: (...a) => tblOcrWhole(...a), tblMerge: (...a) => tblMerge(...a), master: () => Master.ready, masterPrefix: (...a) => masterPrefix(...a), form: () => Form.items.length, altFor: (...a) => altFor(...a), searchMaster: (...a) => searchMaster(...a), report: () => actions.report(), state: () => state, kyu: j => { kyuAdd(kyuRowsFromLLM(j)); openPanel({ type: 'kyu' }); return kyuCSV() + '\n' + kyuJSON().slice(0, 300); }, pages: () => ui.scanPages, parseLayout: p => parseLayout(p), parseReport: t => parseReport(t), parseText: t => parse(t), review: t => openPanel({ type: "review", review: makeReview(t) }), norm: (q, l) => l ? normSpoken(q) : normName(q) }; } catch (e) {}
 // 端末内OCRの切り替え：GitHub Pages版は NDLOCR-Lite（既定）、Claude上の版は Tesseract
 const ocrEngine = () => { if (!window.JISHIYAKU_SITE) return 'tess'; try { return localStorage.getItem('jishiyaku.ocr') || 'ndl'; } catch (e) { return 'ndl'; } };
 async function ndlCached() {
@@ -2308,7 +2308,7 @@ async function camTorch() {
 const CLINIC = /(病院|医院|クリニック|診療所|医療センター|内科|外科|眼科|皮膚科|耳鼻|歯科|整形|小児科|泌尿器|婦人科|心療|精神科)/;
 const PHARM = /(薬局|調剤|ファーマシー|ドラッグ)/;
 const NOISE = /(TEL|Tel|電話|FAX|〒|住所|薬剤師|お薬手帳|調剤日|処方日|交付日|患者|生年月日|保険|負担|領収|点数|注意|お大事|様$|効能|効果[)）]|引換券|医師名|病棟|診療科|さんのお薬|処方されています|先生$)/;
-const FORM = /(錠|カプセル|散|顆粒|細粒|シロップ|DS|液|テープ|パップ|軟膏|クリーム|ローション|ゲル|点眼|点鼻|吸入|エアゾール|坐剤|坐薬|貼付剤|注|OD|mg|μg|mL)/;
+const FORM = /(錠|カプセル|散|顆粒|細粒|シロップ|DS|液|テープ|パップ|軟膏|クリーム|ローション|ゲル|点眼|点鼻|吸入|エアゾール|坐剤|坐薬|貼付剤|注|OD|mg|μg|mL|ガーグル|ゼリー|配合)/;
 const USAGE_SRC = '(1日\\s*\\d+\\s*回|1回|分\\s*\\d|毎食|朝食|昼食|夕食|食前|食後|食間|就寝前|寝る前|眠前|起床時|頓用|頓服|\\d+\\s*日分|\\d+\\s*回分|時間毎|時間おき|疼痛時|発熱時|不眠時|便秘時|必要時|適宜|塗布|患部|貼付)';
 const UNIT_SRC = '(錠|カプセル|C|包|g|mL|ml|枚|本|個|滴|袋|T|瓶|キット|噴霧|吸入)';
 const DOSE_CORE = '((1日|1回)\\s*)?\\d+(\\.\\d+)?\\s*' + UNIT_SRC;
@@ -2356,9 +2356,13 @@ function cleanName(s) {
   return s.replace(/^\s*(Rp\.?\s*\d+|\d+\s*[).、．:]|[①-⑳]|[・•*])\s*/, '')
           .replace(/【(内服|外用|頓服|内用|屯用)[^】]*】/g, '').trim();
 }
+// 「点鼻液」「点眼液」「吸入用」「貼付剤」のように、用法の語が薬品名の一部になっている所は用法の始まりとみなさない
+const maskNameUsage = t => t.replace(/(点鼻|点眼|点耳|吸入|貼付|塗布|うがい)(?=液|剤|用|薬|粉末|エアゾール|ソフト|カプセル)/g, m => '＊'.repeat(m.length));
+// 「1日2回 ×1調剤」のように薬局の語（調剤）を含んでも、用法の形がはっきりしていれば用法の行
+const USAGE_SURE = /(1日\s*\d+\s*回|\d+\s*日分|\d+\s*回分|[×x]\s*\d+\s*調剤)/;
 function splitDrugLine(line) {
   const fixed = fixUsageOcr(line);
-  const st = structUsage(line).startStrict;
+  const st = structUsage(maskNameUsage(line)).startStrict;
   let head = fixed, usage = '';
   if (st >= 0) { head = fixed.slice(0, st); usage = fixed.slice(st).trim(); }
   head = head.trim();
@@ -2375,9 +2379,35 @@ function parse(text) {
     if (current < 0) { clinics.push({ id: uid(), name: '医療機関不明', drugs: [] }); current = clinics.length - 1; }
     return current;
   };
+  const drugAt = r => r && clinics[r[0]].drugs[r[1]];
+  let prevRx = false;
   for (const raw of text.split(/\r?\n/)) {
-    const line = normalize(raw);
-    if (line.length < 2) continue;
+    const full = normalize(raw);
+    if (full.length < 2) continue;
+    // 行頭の番号・記号（[1]、【3】、(内)◇、◇、「1 」）は外して読む。付いていれば薬の行の目印
+    const marked = /^\s*(?:[\[［【〔(（]\s*\d{1,2}\s*[\]］】〕)）]|\d{1,2}\s+(?=[ァ-ヴA-Za-z一-龥])|(?:[(（][内外頓注屯][)）])?\s*[◇□■●○])/.test(full) && !/^\s*◆/.test(full);
+    const line = marked ? stripMarks(full) : full.replace(/^\s*◆\s*/, '');
+    const letters = line.replace(/\d+(?:\.\d+)?\s*(?:mg|μg|g|mL|ml|錠|カプセル|包|枚|本|個|瓶|袋|キット|吸入|噴霧|滴|単位|%)/g, '').replace(/[^ァ-ヴA-Za-z一-龥ぁ-ん]/g, '');
+
+    // 一般名（処方箋記載名）の行と、その折り返し（「0%」など）
+    if (RX_LINE.test(line) && lastDrug) {
+      const d = drugAt(lastDrug);
+      const body = line.replace(/^.*?(一?般名\s*[:：]?\s*)/, '');
+      const dm = body.match(DOSE_END);
+      d.rxName = cleanTail((dm ? body.slice(0, dm.index) : body).replace(/^【般】|^\[般\]|^\(般\)/, ''));
+      if (dm && !d.dose) d.dose = dm[0].trim();
+      prevRx = true; continue;
+    }
+    if (prevRx && lastDrug && line.length <= 6 && !DOSE_ONLY.test(line) && !USAGE.test(line)) { const d = drugAt(lastDrug); d.rxName = cleanTail(d.rxName + line); continue; }
+    prevRx = false;
+    // 「(0.5g)」のような括弧書きの量 → 直前の薬の補足
+    if (lastDrug && /^[(（]\s*\d+(?:\.\d+)?\s*[a-zA-Z錠枚包]+\s*[)）]$/.test(line)) { const d = drugAt(lastDrug); d.note = (d.note ? d.note + ' ' : '') + line; continue; }
+    // 名前の文字がない行（「8mL 1瓶」「1.02g」など）→ 直前の薬の量
+    if (lastDrug && letters.length < 2 && /\d/.test(line) && !structUsage(line).days) {
+      const dm = line.match(DOSE_END), d = drugAt(lastDrug);
+      if (dm && !d.dose) d.dose = dm[0].trim();
+      continue;
+    }
 
     const cn = clinicName(line);
     if (cn) {
@@ -2386,9 +2416,9 @@ function parse(text) {
       waiting = []; lastDrug = null; prevUsage = false; prevWasDrug = false;
       continue;
     }
-    if (NOISE.test(line) || PHARM.test(line)) { prevUsage = false; prevWasDrug = false; continue; }
+    if ((NOISE.test(line) || PHARM.test(line)) && !USAGE_SURE.test(line)) { prevUsage = false; prevWasDrug = false; continue; }
 
-    if (isDrugLine(line)) {
+    if (isDrugLine(line) || (marked && /[ァ-ヴA-Za-z一-龥]{2,}/.test(line))) {
       const p = splitDrugLine(line);
       if (!p.name) continue;
       // 2行目の処方箋記載名（【般】〜など）は直前の薬に紐づける
@@ -2731,6 +2761,15 @@ function fixDoseText(t, nameHint) {
   }
   return m[1] + u;
 }
+function mergeTokens(words, h) {
+  const out = [];
+  for (const w of words) {
+    const p = out[out.length - 1];
+    if (p && w.x0 - p.x1 <= h * 0.25) { p.t += w.t; p.x1 = w.x1; }
+    else out.push({ ...w });
+  }
+  return out;
+}
 function splitDose(words, W, h = 20) {
   // 右から：記号のゴミを飛ばし、1〜3語をつなげて用量の形になれば用量とする
   let end = words.length;
@@ -2819,7 +2858,12 @@ function parseLayout(pages) {
       return searchSkeleton(sk, strengths, 3);
     };
     for (const l of lines) {
-      const { dose, left, x0: doseX0 } = splitDose(l.words, W, l.h);
+      // NDLOCRは1文字ずつ返すので、詰まって並ぶ文字を1語にまとめてから右端の用量を探す（「1.02g」「60mL」「10回分」が切れないように）
+      const toks = mergeTokens(l.words, l.h);
+      const sd = splitDose(toks, W, l.h);
+      const { dose, x0: doseX0 } = sd;
+      const lastX = sd.left.length ? sd.left[sd.left.length - 1].x1 : -Infinity;
+      const left = l.words.filter(w => w.x1 <= lastX + 0.5);
       const text = joinWords(left, l.h);
       let bare = stripMarks(text).replace(/^[|｜]\s*/, '');
       if (ndl) bare = bare.replace(/^\d{1,2}(?=[ァ-ヴ])/, '');   // 「1ロキソプロフェン…」の行番号
@@ -2833,7 +2877,7 @@ function parseLayout(pages) {
         if (i >= 0) current = i; else { clinics.push({ id: uid(), name: cn, drugs: [] }); current = clinics.length - 1; }
         waiting = []; lastDrug = null; prevKind = 'clinic'; continue;
       }
-      if (bare && (NOISE.test(bare) || PHARM.test(bare))) { prevKind = 'noise'; continue; }
+      if (bare && (NOISE.test(bare) || PHARM.test(bare)) && !USAGE_SURE.test(bare)) { prevKind = 'noise'; continue; }
 
       // 用量だけの行 → 直前の薬
       if (!bare && dose) {
@@ -4191,7 +4235,7 @@ function parseReport(text) {
       const p = m[1].trim();
       t = t.slice(0, m.index).trim();
       let mm;
-      if ((mm = p.match(/^残薬\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(\D*)$/))) { d.remain = { amt: +mm[1], unit: mm[2].trim() }; d.remainText = p; }
+      if ((mm = p.match(/^残(?:薬|り|数)?\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(\D*)$/))) { d.remain = { amt: +mm[1], unit: mm[2].trim() }; d.remainText = p; }
       else if (/^持参なし/.test(p)) { d.none = true; d.remainText = p; }
       else if (/^(使いかけ\s*\d|\d+(?:\.\d+)?\s*(本|個|枚|瓶|袋|筒|キット|箱)(?:[、,]|$))/.test(p)) {
         d.ext = true; d.remainText = p;
