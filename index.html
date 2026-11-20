@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 08:35';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 12:16';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -4510,10 +4510,12 @@ function formRowsHTML(rows) {
         <div class="inline"><button class="btn danger" data-act="formDelGo" data-r="${esc(r.r)}">外す</button><button class="btn" data-act="formDelNo">やめる</button></div></div>` : ''}
       ${ui.panel?.edit === r.r ? `<div class="confirm form-edit" style="margin-bottom:6px">
           <p><b>${esc(r.n ? shortName(r.n) : r.r)}</b> の棚番・備考を直す（全端末）</p>
-          <div class="field"><label for="feLoc">棚番（空欄にすると棚番なし）</label><input id="feLoc" value="${esc(r.loc || '')}" list="feLocs" placeholder="例：A-2-d、冷蔵庫1" autocomplete="off"></div>
+          <div class="field"><label for="feLoc">棚番（空欄にすると棚番なし）</label><input id="feLoc" value="${esc(ui.panel.editLoc ?? r.loc ?? '')}" list="feLocs" placeholder="例：A-2-d、冷蔵庫1" autocomplete="off" enterkeyhint="done"></div>
           <datalist id="feLocs">${[...new Set(Form.items.map(x => x.loc).filter(Boolean))].sort().map(l => `<option value="${esc(l)}">`).join('')}</datalist>
-          <div class="field"><label for="feMemo">備考（空欄可）</label><input id="feMemo" value="${esc(r.memo || '')}" autocomplete="off"></div>
+          <div class="field"><label for="feMemo">備考（空欄可）</label><input id="feMemo" value="${esc(ui.panel.editMemo ?? r.memo ?? '')}" autocomplete="off" enterkeyhint="done"></div>
+          ${ui.panel.editErr ? `<p class="warnline" role="alert">${esc(ui.panel.editErr)}</p>${/トークン/.test(ui.panel.editErr) ? '<p class="muted">この画面の一番下の「GitHubへの書き込み設定」で、この端末にトークンを入れてください。</p>' : ''}` : ''}
           <div class="inline"><button class="btn primary" data-act="formEditGo" data-r="${esc(r.r)}">保存</button><button class="btn" data-act="formEditNo">やめる</button></div></div>` : ''}
+      ${ui.panel?.rowMsg?.r === r.r ? `<p class="okline" role="status" style="flex-basis:100%;margin:0 0 4px">${esc(ui.panel.rowMsg.text)}</p>` : ''}
       <div class="info" data-act="formEditOpen" data-r="${esc(r.r)}" role="button" tabindex="0" style="cursor:pointer"><div class="dname">${esc(r.n ? shortName(r.n) : r.r)}${r.loc ? `<span class="tag loc">${esc(r.loc)}</span>` : '<span class="tag note">棚番なし</span>'}</div>
       <div class="sub">${r.n && shortName(r.n) !== r.r ? '棚表：' + esc(r.r) : ''}${r.memo ? `${r.n && shortName(r.n) !== r.r ? '・' : ''}${esc(r.memo)}` : ''}${['check', 'none'].includes(r.st) ? ' <span class="tag warn">' + (r.st === 'check' ? '要確認' : '該当なし') + '</span>' : ''}${r.st === 'add' ? ' <span class="tag note">追加</span>' : ''}${r.pending ? ' <span class="tag note">反映待ち</span>' : ''}</div></div>
       <button class="x" data-act="formDel" data-r="${esc(r.r)}" aria-label="採用薬から外す">✕</button>
@@ -5768,20 +5770,25 @@ const actions = {
       openPanel({ type: 'formList', q: '', msg: `「${name}」を追加しました。この端末ではすぐ使えます。全端末への反映は2〜3分後です。` });
     } catch (e) { p.busy = false; p.msg = '追加できませんでした：' + (e.message || e); renderPanel(); }
   },
-  formEditOpen: el => { ui.panel.edit = ui.panel.edit === el.dataset.r ? null : el.dataset.r; ui.panel.del = null; ui.panel.msg = ''; renderPanel(); setTimeout(() => $('#feLoc')?.focus(), 50); },
-  formEditNo: () => { ui.panel.edit = null; renderPanel(); },
+  formEditOpen: el => {
+    if (ui.panel.edit === el.dataset.r) return;   // 開いている窓は「やめる」でだけ閉じる（キーボードでタップ位置がずれても閉じないように）
+    Object.assign(ui.panel, { edit: el.dataset.r, editLoc: null, editMemo: null, editErr: '', rowMsg: null, del: null, msg: '' });
+    renderPanel(); setTimeout(() => $('#feLoc')?.focus(), 50);
+  },
+  formEditNo: () => { Object.assign(ui.panel, { edit: null, editLoc: null, editMemo: null, editErr: '' }); renderPanel(); },
   formEditGo: async el => {
     const p = ui.panel, raw = el.dataset.r, r = Form.items.find(x => x.r === raw);
     if (!r) return;
     const loc = ($('#feLoc')?.value || '').trim(), memo = ($('#feMemo')?.value || '').trim();
-    if (loc === (r.loc || '') && memo === (r.memo || '')) { p.edit = null; renderPanel(); return; }
-    if (!ghToken()) { p.msg = '先に下の「GitHubへの書き込み設定」でトークンを入れてください'; p.err = true; renderPanel(); return; }
+    p.editLoc = loc; p.editMemo = memo;   // 失敗しても入力した値を残す
+    if (loc === (r.loc || '') && memo === (r.memo || '')) { p.editErr = '棚番・備考が変わっていません'; renderPanel(); return; }
+    if (!ghToken()) { p.editErr = 'この端末にGitHubのトークンが入っていないため保存できません'; renderPanel(); return; }
     el.disabled = true; el.textContent = '書き込み中…';
     try {
       // 空欄にしたときは「なし」と書いて消す（空欄は「変えない」の意味になるため）
       await formEdit({ op: '追加', r: raw, y: '', n: r.n || '', loc: loc || (r.loc ? 'なし' : ''), memo: memo || (r.memo ? 'なし' : '') });
-      Object.assign(p, { edit: null, err: false, msg: `「${shortName(r.n || raw)}」の棚番を${loc || 'なし'}にしました。全端末への反映は2〜3分後です。` });
-    } catch (e) { Object.assign(p, { err: true, msg: '保存できませんでした：' + (e.message || e) }); }
+      Object.assign(p, { edit: null, editLoc: null, editMemo: null, editErr: '', rowMsg: { r: raw, text: `✓ 棚番を${loc || 'なし'}にしました（全端末へは2〜3分後）` } });
+    } catch (e) { p.editErr = '保存できませんでした：' + (e.message || e); }
     renderPanel();
   },
   formDel: el => { ui.panel.del = el.dataset.r; ui.panel.edit = null; ui.panel.msg = ''; renderPanel(); },
@@ -6152,6 +6159,7 @@ document.addEventListener('keydown', e => {
     e.preventDefault(); e.target.click();
   }
   if (e.key === 'Enter' && e.target.id === 'looseInput') { e.preventDefault(); actions.looseAdd(); }
+  if (e.key === 'Enter' && (e.target.id === 'feLoc' || e.target.id === 'feMemo')) { e.preventDefault(); const b = document.querySelector('[data-act="formEditGo"]'); if (b) actions.formEditGo(b); }
   if (e.key === 'Enter' && e.target.id === 'gs1In') { e.preventDefault(); (ui.panel?.type === 'add' ? actions.addGs1 : actions.gs1Apply)(); }
 });
 
