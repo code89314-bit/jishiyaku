@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 12:16';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 12:34';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -344,6 +344,12 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .alt-l.ok { color: var(--accent); font-weight: 700; }
 .alt-l .tag { margin-left: 3px; }
 .spot { border: 2px solid var(--accent); }
+.nc-card { border: 2px solid var(--pack); margin-bottom: 12px; }
+.nc-steps { margin: 0; padding-left: 1.4em; display: grid; gap: 8px; font-size: 14px; line-height: 1.5; }
+.nc-steps li.done::marker { color: var(--accent); }
+.nc-steps li.now { font-weight: 400; }
+.nc-steps li.now b { color: var(--pack); }
+.nc-bag { border: 2px solid var(--pack); }
 .exp-qty { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .exp-qty input { flex: 0 0 6em; font-size: 20px; font-weight: 700; text-align: right; }
 .exp-qty .btn { min-height: 44px; padding: 0 12px; }
@@ -2917,6 +2923,98 @@ function merge(incoming) {
   return { added, skipped };
 }
 
+/* ---- ノンコンプライアンス（実物から鑑別）：実物を1つずつ数え、薬袋の医院名・用法を記録 → 最後にお薬手帳で照合して、
+   持ってきていない薬（手帳だけにある薬）を「持参なし」で足す。手帳にない実物には印を付ける ---- */
+const NC_UNKNOWN = '医療機関不明';
+const isUnknownClinic = c => !c || c.name === NC_UNKNOWN || c.name === OUTSIDE;
+function ncSame(a, b) {
+  if (a.yj && b.yj && a.yj.slice(0, 9) === b.yj.slice(0, 9)) return true;
+  const k = s => normalize(String(s || '')).replace(/\s/g, '');
+  if (k(a.name) && k(a.name) === k(b.name)) return true;
+  if (BRANDLESS && a.yj && b.yj && grpKeyOf({ n: a.name, y: a.yj }) === grpKeyOf({ n: b.name, y: b.yj })) return true;
+  return !!(b.rxName && k(a.name) === k(b.rxName)) || !!(a.rxName && k(a.rxName) === k(b.name));
+}
+function ncMerge(incoming) {
+  let matched = 0, listOnly = 0, moved = 0;
+  const physical = () => state.clinics.flatMap(c => c.drugs.filter(d => !d.listOnly).map(d => ({ d, c })));
+  for (const ic of incoming) {
+    const name = (ic.name || '').trim() || NC_UNKNOWN, dept = (ic.dept || '').trim();
+    for (const d0 of ic.drugs) {
+      if (!(d0.name || '').trim()) continue;
+      const d = { ...d0, name: d0.name.trim(), dose: (d0.dose || '').trim(), usage: (d0.usage || '').trim() };
+      const hit = physical().find(x => ncSame(x.d, d));
+      let target = state.clinics.find(x => sameClinic(x, { name, dept }));
+      if (hit) {
+        const m = hit.d; m.inList = true; matched++;
+        for (const f of ['dose', 'usage', 'rxName', 'usageLabel']) if (!m[f] && d[f]) m[f] = d[f];
+        if (!m.u && d.u) m.u = d.u;
+        if (!m.yj && d.yj) { m.yj = d.yj; m.matchSim = d.matchSim; }
+        // 医院が分からない実物は、手帳の医療機関へ移す
+        if (isUnknownClinic(hit.c) && name !== NC_UNKNOWN) {
+          if (!target) { target = { id: uid(), name, dept, drugs: [] }; state.clinics.push(target); }
+          hit.c.drugs = hit.c.drugs.filter(x => x.id !== m.id); target.drugs.push(m); moved++;
+        }
+        continue;
+      }
+      if (state.clinics.some(c => c.drugs.some(x => x.listOnly && ncSame(x, d)))) continue;   // 同じ手帳を2回読んだ
+      if (!target) { target = { id: uid(), name, dept, drugs: [] }; state.clinics.push(target); }
+      target.drugs.push({ ...d, id: d.id || uid(), entries: [], listOnly: true });
+      listOnly++;
+    }
+  }
+  state.clinics = state.clinics.filter(c => c.drugs.length);
+  state.ncChecked = true;
+  save();
+  return { matched, listOnly, moved };
+}
+function ncTag(d) {
+  if (!state.nc || !state.ncChecked) return '';
+  if (d.listOnly) return total(d) > 0 || (isExt(d) && extText(d)) ? '<span class="tag note">手帳から追加</span>' : '<span class="tag note">手帳のみ（持参なし）</span>';
+  return d.inList ? '' : '<span class="tag warn">手帳になし</span>';
+}
+function ncCounts() {
+  const all = state.clinics.flatMap(c => c.drugs);
+  const phys = all.filter(d => !d.listOnly);
+  return { phys: phys.length, notInList: state.ncChecked ? phys.filter(d => !d.inList).length : 0, listOnly: all.filter(d => d.listOnly && !total(d)).length };
+}
+function ncCard() {
+  const n = ncCounts();
+  return `<div class="block nc-card">
+    <h3>ノンコンプライアンス<small>実物から鑑別</small></h3>
+    <ol class="nc-steps">
+      <li class="${n.phys ? 'done' : 'now'}"><b>実物を1つずつ</b>：GS1か名前で薬を特定 → 数える → 薬袋に医院名・用法があれば記録<br>
+        <span class="muted">実物 ${n.phys}品目</span></li>
+      <li class="${state.ncChecked ? 'done' : n.phys ? 'now' : ''}"><b>最後にお薬手帳・リストで照合</b>：持ってきていない薬を「持参なし」で追加<br>
+        <span class="muted">${state.ncChecked ? `照合済み：手帳になし ${n.notInList}品目・持参なし ${n.listOnly}品目` : 'まだ照合していません'}</span></li>
+    </ol>
+    <div class="inline">
+      <button class="btn primary" data-act="ncNext" style="min-height:52px;flex:1">＋ 次の実物</button>
+      <button class="btn${n.phys && !state.ncChecked ? ' primary' : ''}" data-act="ncCompare" style="min-height:52px;flex:1">お薬手帳で照合</button>
+    </div>
+    <button class="btn ghost" data-act="ncOff" style="justify-self:start">通常の鑑別（リストから）に戻す</button>
+  </div>`;
+}
+function ncMoveDrug(drugId, name) {
+  const r = findDrug(drugId); if (!r || !name) return;
+  let to = state.clinics.find(x => x.name === name && !x.dept) || state.clinics.find(x => x.name === name);
+  if (!to) { to = { id: uid(), name, dept: '', drugs: [] }; state.clinics.push(to); }
+  if (to === r.clinic) return;
+  r.clinic.drugs = r.clinic.drugs.filter(d => d.id !== r.drug.id); to.drugs.push(r.drug);
+  state.clinics = state.clinics.filter(c => c.drugs.length);
+  save();
+}
+function ncBagBlock(r) {
+  const d = r.drug, names = [...new Set([NC_UNKNOWN, ...state.clinics.map(c => c.name).filter(n => n !== OUTSIDE)])];
+  return `<div class="block nc-bag">
+    <h3>薬袋の情報<small>あれば記録（空欄でよい）</small></h3>
+    <div class="field"><label>医院名</label>
+      <div class="sizes">${names.map(n => `<button class="seg${r.clinic.name === n ? ' on' : ''}" data-act="ncClinic" data-v="${esc(n)}" style="padding:0 10px">${esc(n)}</button>`).join('')}</div>
+      <div class="other" style="margin-top:6px"><input id="ncClinicNew" placeholder="ほかの医院名を入れる" autocomplete="off"><button class="btn" data-act="ncClinicNew">この医院にする</button></div></div>
+    <div class="field"><label for="nc-usage">用法（薬袋の記載）</label><input id="nc-usage" data-f="usage" value="${esc(d.usage || '')}" placeholder="例：1日2回 朝夕食後" autocomplete="off"></div>
+    <button class="btn primary" data-act="ncNext" style="min-height:52px">次の実物へ</button>
+  </div>`;
+}
+
 function deleteDrug(id) {
   for (const c of state.clinics) c.drugs = c.drugs.filter(d => d.id !== id);
   state.clinics = state.clinics.filter(c => c.drugs.length);
@@ -4220,7 +4318,7 @@ function rowHtml(d) {
     <div class="info">
       <div class="dname">${esc(displayName(d))}</div>
       ${info ? `<div class="sub">${esc(info)}</div>` : ''}
-      ${(packs.length || (Master.ready && !matched(d)) || (supplyOf(d)?.code > 1) || altTag(d)) ? `<div class="tags">${Master.ready && !matched(d) ? '<span class="tag warn">マスター未照合</span>' : ''}${supplyOf(d)?.code > 1 ? supplyTag(supplyOf(d)) : ''}${altTag(d)}${packs.map(p => `<span class="tag">${esc(p.name)} ${esc(packSummary(p) || '包数未入力')}</span>`).join('')}</div>` : ''}
+      ${(packs.length || (Master.ready && !matched(d)) || (supplyOf(d)?.code > 1) || altTag(d) || ncTag(d)) ? `<div class="tags">${ncTag(d)}${Master.ready && !matched(d) ? '<span class="tag warn">マスター未照合</span>' : ''}${supplyOf(d)?.code > 1 ? supplyTag(supplyOf(d)) : ''}${altTag(d)}${packs.map(p => `<span class="tag">${esc(p.name)} ${esc(packSummary(p) || '包数未入力')}</span>`).join('')}</div>` : ''}
     </div>
     <div class="qty" data-qty="${d.id}">${!t ? '<div class="none">—</div>'
       : isExt(d) ? `<div class="num" style="font-size:15px">${esc(extText(d))}</div><div class="bd">外用</div>`
@@ -4249,12 +4347,17 @@ function renderMain() {
   $('#searchWrap').hidden = !hasDrugs;
 
   let html = '';
-  if (!hasDrugs) {
+  if (state.nc && !ui.packMode) html += ncCard();
+  if (!hasDrugs && state.nc) {
+    // ノンコンプライアンス：カードだけ
+  } else if (!hasDrugs) {
     html = `<div class="empty">
       <h2>お薬手帳を読み取ってください</h2>
       <p>読み取った薬は医療機関ごとに並びます。数量はシート単位・バラ単位で何度でも足せます。</p>
+      <p class="muted">複数の診療科・整理されていない・古い薬ばかりのときは「実物から鑑別」：先に実物を数え、最後にお薬手帳で照合します。</p>
       <div class="acts">
         <button class="btn primary" data-act="scan">お薬手帳を読み取る</button>
+        <button class="btn primary" data-act="ncStart">実物から鑑別（ノンコンプライアンス）</button>
         <button class="btn" data-act="sample">サンプルで試す</button>
       </div>
       ${sessions.some(s => s.id !== ui.sid) ? `<button class="btn" data-act="sessions">保存した患者を再開（${sessions.filter(s => s.id !== ui.sid).length}件）</button>` : ''}
@@ -4277,7 +4380,8 @@ function renderMain() {
     }
     if (!shown) html += `<p class="muted">「${esc(ui.search)}」に一致する薬はありません。</p>`;
     if (!ui.packMode) html += `<div style="display:grid;gap:10px">
-      <button class="btn" data-act="addPanel" style="min-height:52px">＋ 手帳にない薬を追加（GS1・名前検索）</button>
+      ${state.nc ? '' : `<button class="btn" data-act="addPanel" style="min-height:52px">＋ 手帳にない薬を追加（GS1・名前検索）</button>
+      <button class="btn ghost" data-act="ncStart">実物から鑑別（ノンコンプライアンス）に切り替える</button>`}
       <button class="btn primary" data-act="report" style="min-height:52px">鑑別レポートを作成</button></div>`;
   }
   $('#list').innerHTML = html;
@@ -4692,6 +4796,8 @@ const PANELS = {
           </div>
         </div>`}
 
+        ${state.nc && !d.listOnly ? ncBagBlock(r) : ''}
+
         <div class="block">
           <h3>入力明細<small>✕ で個別に削除</small></h3>
           <div class="entries">
@@ -4776,7 +4882,7 @@ const PANELS = {
     const p = ui.panel;
     const names = [...state.clinics.map(c => c.name).filter(n => n !== OUTSIDE), OUTSIDE];
     return {
-      title: '薬を追加',
+      title: state.nc && !p.spot ? '実物を追加' : '薬を追加',
       left: `<button class="btn ghost" data-act="close">閉じる</button>`,
       body: `
         <div class="block">
@@ -5648,12 +5754,14 @@ const actions = {
   rvAddDrug: el => { ui.panel.review.clinics[+el.dataset.i].drugs.push(newDrug()); renderPanel(); },
   rvAddClinic: () => { ui.panel.review.clinics.push({ id: uid(), name: '', drugs: [newDrug()] }); renderPanel(); },
   rvNext: () => {
+    if (state.nc) { const r = ncMerge(ui.panel.review.clinics); ui.scanText = ''; ui.scanPages = []; ui.scanPagesText = ''; save(); openPanel({ type: 'scan' }); ncNote(r); return; }
     const r = merge(ui.panel.review.clinics);
     ui.scanText = ''; ui.scanPages = []; ui.scanPagesText = ''; save();
     openPanel({ type: 'scan' });
     flashNote(r);
   },
   rvDone: () => {
+    if (state.nc) { const r = ncMerge(ui.panel.review.clinics); ui.scanText = ''; ui.scanPages = []; ui.scanPagesText = ''; save(); closePanel(); ncNote(r); return; }
     const r = merge(ui.panel.review.clinics);
     ui.scanText = ''; ui.scanPages = []; ui.scanPagesText = ''; save();
     closePanel();
@@ -5907,7 +6015,13 @@ const actions = {
   },
 
   // 薬の追加
-  addPanel: () => openPanel({ type: 'add', clinic: OUTSIDE }),
+  addPanel: () => openPanel({ type: 'add', clinic: state.nc ? NC_UNKNOWN : OUTSIDE }),
+  ncStart: () => { state.nc = true; save(); closePanel(); renderMain(); },
+  ncOff: () => { state.nc = false; save(); renderMain(); },
+  ncNext: () => { ui.note = ''; openPanel({ type: 'add', clinic: ncLastClinic() }); },
+  ncCompare: () => { ui.ncCompare = true; openPanel({ type: 'scan' }); },
+  ncClinic: el => { ncMoveDrug(ui.panel.id, el.dataset.v); ui.ncClinic = el.dataset.v; refresh(); },
+  ncClinicNew: () => { const v = ($('#ncClinicNew')?.value || '').trim(); if (!v) return; ncMoveDrug(ui.panel.id, v); ui.ncClinic = v; refresh(); },
   addClinic: el => { ui.panel.clinic = el.dataset.v; renderPanel(); },
   addGs1: () => {
     const msg = $('#gs1Msg'), inp = $('#gs1In'), g = parseGS1(inp?.value);
@@ -6120,6 +6234,8 @@ const actions = {
 };
 
 const OUTSIDE = '手帳外（持参のみ）';
+// 次の実物は、直前に選んだ薬袋の医院を初期値にする（同じ薬袋から続けて出すことが多い）
+const ncLastClinic = () => (ui.ncClinic && state.clinics.some(c => c.name === ui.ncClinic)) ? ui.ncClinic : NC_UNKNOWN;
 function clinicFor(name) {
   let c = state.clinics.find(x => x.name === name);
   if (!c) { c = { id: uid(), name, drugs: [] }; state.clinics.push(c); }
@@ -6128,8 +6244,9 @@ function clinicFor(name) {
 // すでに一覧にある薬なら、その薬を開く（「あ、もう1シートあった」に対応）
 function addDrugFromMaster(it, sim, gtin) {
   for (const c of state.clinics) {
-    const d = c.drugs.find(x => (it.y && x.yj === it.y && x.name === it.n) || x.name === it.n);
+    const d = c.drugs.find(x => (it.y && x.yj === it.y && x.name === it.n) || x.name === it.n || (state.nc && ncSame(x, { name: it.n, yj: it.y || '' })));
     if (d) {
+      if (state.nc && d.listOnly) { d.listOnly = false; d.inList = true; }   // 手帳だけにあった薬の実物が後から出てきた
       if (gtin && !d.gs1) d.gs1 = gtin;
       const sz = gtin && sheetFromGS1(gtin); if (sz) d.sheetSize = sz;
       ui.note = `${displayName(d)} は一覧にあります（${c.name}）${sz ? `。1シート${sz}に設定` : ''}`; save(); openHeat(d.id); return;
@@ -6143,6 +6260,10 @@ function addDrugFromMaster(it, sim, gtin) {
   openHeat(d.id);
 }
 
+function ncNote(r) {
+  ui.note = `照合しました：実物と一致 ${r.matched}品目${r.moved ? `（うち${r.moved}品目を手帳の医療機関へ移動）` : ''}・持参なしで追加 ${r.listOnly}品目`;
+  renderMain();
+}
 function flashNote(r) {
   ui.note = r.skipped ? `${r.added}品目を追加（重複${r.skipped}品目はスキップ）` : `${r.added}品目を追加しました`;
   renderBottom();
@@ -6316,7 +6437,8 @@ document.addEventListener('change', async e => {
     for (const f of files) ocrImage(f);
     return;
   }
-  if (e.target.dataset.f && ui.panel?.type === 'heat') renderPanel();
+  // 入力欄から直接ボタンを押したとき、先に描き直すとボタンが消えて押せないので、少し待ってから描き直す
+  if (e.target.dataset.f && ui.panel?.type === 'heat') { const id = ui.panel.id; setTimeout(() => { if (ui.panel?.type === 'heat' && ui.panel.id === id && !document.activeElement?.matches?.('input,textarea')) renderPanel(); }, 300); }
   if (e.target.id === 'masterFile' && e.target.files.length) {
     const files = [...e.target.files];
     const msg = t => { ui.panel.msg = t; const m = $('#masterMsg'); if (m) m.textContent = t; };
