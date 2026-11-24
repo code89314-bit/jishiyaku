@@ -9,7 +9,7 @@
 <meta name="theme-color" content="#0e6a5a">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon.png">
-<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-20 12:46';</script>
+<script>window.JISHIYAKU_SITE = true; window.JISHIYAKU_VER = '2026-11-24 10:45';</script>
 <style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style>
 </head><body>
 <title>持参薬鑑別サポート</title>
@@ -354,6 +354,20 @@ details pre { white-space: pre-wrap; font-size: 12px; margin: 8px 0 0; }
 .exp-qty input { flex: 0 0 6em; font-size: 20px; font-weight: 700; text-align: right; }
 .exp-qty .btn { min-height: 44px; padding: 0 12px; }
 .exp-month { margin-top: 10px; }
+.dlist { gap: 0; padding: 4px 14px; }
+.drow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
+.drow:first-child { border-top: 0; }
+.drow .info { flex: 1; min-width: 0; cursor: pointer; }
+.drow .sub .tag { margin-left: 6px; }
+.drow.done .dname { color: var(--muted); }
+.drow .dq-ok { min-height: 44px; padding: 0 12px; white-space: nowrap; }
+.drow.done .dq-ok { background: var(--accent-soft); color: var(--accent); border-color: transparent; min-width: 44px; }
+.dedit { flex-basis: 100%; display: grid; gap: 10px; padding: 8px 0 4px; }
+.dbtns { flex-basis: 100%; display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 6px; }
+.dbtns .btn { min-height: 46px; padding: 0 6px; font-size: 14px; }
+.drow.done .dq-ok { background: var(--accent-soft); color: var(--accent); }
+.drow.open { background: var(--accent-soft); margin: 0 -14px; padding: 10px 14px; border-radius: 10px; }
+.dfind #deptHits .drow { border: 2px solid var(--accent); border-radius: 12px; padding: 10px; margin-top: 8px; }
 .exp-row-qty { display: flex; align-items: center; gap: 6px; flex-basis: 100%; }
 .exp-row-qty input { width: 4.2em; font: inherit; font-size: 16px; font-weight: 700; text-align: right; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }
 .exp-row-qty span { font-size: 13px; color: var(--muted); min-width: 2em; }
@@ -2184,6 +2198,104 @@ function expCSV() {
   const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
   const rows = [['期限（年月）', '薬品名', '数量', '単位', 'ロット', '棚番', 'YJコード', 'GS1コード']];
   for (const [m, list] of expGroups()) for (const it of list) rows.push([m, it.name, it.qty, it.unit, it.lot, it.loc, it.yj, it.gtin]);
+  return rows.map(r => r.map(q).join(',')).join('\r\n');
+}
+
+/* ---- 部署の定数・期限チェック：部署の定数表（Excel）を取り込み、場所ごとに数と期限を確認 → 不足・過剰・期限切迫をまとめる ---- */
+const DEPT = (() => { let o = {}; try { o = JSON.parse(localStorage.getItem('jishiyaku.dept') || '{}'); } catch (e) {} return { depts: o.depts || [], cur: o.cur || '', chk: o.chk || {}, loc: o.loc || '', q: '', open: null, imp: null, msg: '' }; })();
+const deptSave = () => { try { localStorage.setItem('jishiyaku.dept', JSON.stringify({ depts: DEPT.depts, cur: DEPT.cur, chk: DEPT.chk, loc: DEPT.loc })); } catch (e) {} };
+const deptNoteClear = () => { DEPT.note = ''; };
+const deptCur = () => DEPT.depts.find(d => d.id === DEPT.cur) || DEPT.depts[0] || null;
+const qtyNum = v => { const t = normalize(String(v ?? '')).replace(/\s/g, ''); if (!t) return null; const ns = t.match(/\d+(?:\.\d+)?/g); return ns ? ns.reduce((a, b) => a + +b, 0) : null; };
+const deptClean = t => String(t ?? '').normalize('NFKC').replace(/\u3000/g, ' ').replace(/\s{2,}/g, ' ').replace(/\s*([（(])/g, '$1').trim();   // 表の文字はOCRの補正をかけずにそのまま
+async function deptReadBook(file) {
+  if (/\.xlsx?$/i.test(file.name)) {
+    await loadXLSX();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    return wb.SheetNames.map((n, i) => ({ name: n.trim() || `${i + 1}枚目`, rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' }) }));
+  }
+  return (await fileTables(file)).map((rows, i) => ({ name: file.name, rows }));
+}
+// 表から定数表を組み立てる：「薬品名」「定数」の見出しを探し、その間の列を保管場所とする
+function deptParse(rows, fallbackName) {
+  const hi = rows.findIndex(r => r.some(c => /薬品名|品名/.test(String(c))) && r.some(c => /定数/.test(String(c))));
+  if (hi < 0) throw new Error('「薬品名」と「定数」の見出しが見つかりません');
+  const H = rows[hi].map(c => deptClean(c));
+  const nameCol = H.findIndex(c => /薬品名|品名/.test(c)), teisuCol = H.findIndex(c => /定数/.test(c));
+  const specCol = H[nameCol + 1] === '' || /規格|容量|単位/.test(H[nameCol + 1]) ? nameCol + 1 : -1;
+  const locCols = [];
+  for (let c = (specCol >= 0 ? specCol : nameCol) + 1; c < teisuCol; c++) if (H[c]) locCols.push(c);
+  const title = rows.slice(0, hi).flat().map(deptClean).find(t => t && !/^\d/.test(t)) || '';
+  const items = [];
+  for (const r of rows.slice(hi + 1)) {
+    const name = deptClean(r[nameCol]);
+    if (!name || /薬品名|品名/.test(name) && r.some(c => /定数/.test(String(c)))) continue;
+    const q = {};
+    for (const c of locCols) { const v = deptClean(r[c]); if (v !== '' && qtyNum(v) !== 0) q[H[c]] = v; }
+    const total = qtyNum(r[teisuCol]) ?? Object.values(q).reduce((a, v) => a + (qtyNum(v) || 0), 0);
+    // 場所の列が空で定数だけある薬（「洗浄室」など備考に場所がある）は「その他」で確認する
+    if (!Object.keys(q).length && total > 0 && locCols.length) q['その他'] = String(total);
+    items.push({ id: uid(), name, spec: specCol >= 0 ? deptClean(r[specCol]) : '', q, total, note: deptClean(r[teisuCol + 1]) });
+  }
+  const locs = [...locCols.map(c => H[c]), 'その他'].filter(l => items.some(it => it.q[l] != null));
+  if (!locs.length) { locs.push('全体'); for (const it of items) it.q['全体'] = String(it.total); }
+  return { name: title.replace(/^=+\s*/, '') || fallbackName, locs, items };
+}
+function deptReadEdit() {
+  const e = DEPT.edit; if (!e) return;
+  const n = $('#deptN'), o = $('#deptExpOther'), l = $('#deptLot');
+  if (n) e.n = n.value.trim(); if (l) e.lot = l.value.trim(); if (o && o.value && o.value !== e.exp) e.exp = o.value;
+}
+// 記録したら、検索欄を空にして次の薬を探せるようにする
+function deptAfter() {
+  DEPT.q = ''; renderPanel();
+  setTimeout(() => { const q = $('#deptQ'); if (q && document.activeElement?.tagName !== 'INPUT') q.focus({ preventScroll: true }); }, 30);
+}
+// 1薬品につき1つの記録：ok（問題なし・本数は問わない）／soon（6か月以内：期限と本数）／swap（交換した：新しい期限と本数）
+const DEPT_KIND = { ok: '✓', soon: '期限6か月以内', swap: '交換' };
+const deptRec = (d, it) => DEPT.chk[d.id]?.rec?.[it.id] || null;
+const deptLabel = it => it.name + (it.spec ? ' ' + it.spec : '');
+// 探す：名前の一部（ひらがな・カタカナ・半角カナ・英字）。「（劇）」などの印や空白は無視
+const deptNorm = t => toKata(normalize(String(t || '')).toLowerCase()).replace(/[（(][劇毒向麻][）)]/g, '').replace(/[\s・「」『』()（）\-ー]/g, '');
+function deptSearch(d, q) {
+  const k = deptNorm(q);
+  if (!k) return [];
+  const hits = d.items.filter(it => deptNorm(deptLabel(it)).includes(k));
+  return hits.sort((a, b) => (deptNorm(a.name).startsWith(k) ? 0 : 1) - (deptNorm(b.name).startsWith(k) ? 0 : 1));
+}
+// GS1で読んだ薬を定数表の行に結びつける（名前の近さ＋規格の数字）
+function deptMatchItem(d, it0) {
+  const bn = deptNorm(BRANDLESS ? brandless(it0.n) : it0.n);
+  let best = null;
+  for (const it of d.items) {
+    const a = deptNorm(it.name), sim = 1 - lev(a, bn.slice(0, Math.max(a.length, 4))) / Math.max(a.length, 4);
+    const nums = (normalize(it.spec + it.name).match(/\d+(?:\.\d+)?/g) || []), ok = !nums.length || nums.some(n => normalize(it0.n).includes(n));
+    const sc = sim + (ok ? 0.1 : -0.2) + (bn.startsWith(a.slice(0, 3)) ? 0.1 : 0);
+    if (!best || sc > best.sc) best = { it, sc };
+  }
+  return best && best.sc >= 0.6 ? best.it : null;
+}
+function deptText(d) {
+  const dt = new Date(), recs = d.items.map(it => [it, deptRec(d, it)]);
+  const out = [`【定数・期限チェック】${d.name}　${dt.getFullYear()}/${dt.getMonth() + 1}/${dt.getDate()}`, `チェック ${recs.filter(x => x[1]).length}/${d.items.length}品目`];
+  for (const [k, label] of [['soon', '期限6か月以内'], ['swap', '交換した']]) {
+    const rows = recs.filter(x => x[1]?.kind === k);
+    if (!rows.length) continue;
+    out.push('', `■${label}（${rows.length}）`);
+    for (const [it, r] of rows) out.push(`・${deptLabel(it)}　${expMonthLabel(r.exp)}　${r.n || '?'}本${r.lot ? `（ロット ${r.lot}）` : ''}`);
+  }
+  const left = recs.filter(x => !x[1]);
+  if (left.length && left.length < d.items.length) out.push('', `■未チェック（${left.length}）`, ...left.map(([it]) => `・${deptLabel(it)}`));
+  return out.join('\n');
+}
+// CSVは紙の表と同じ並び（1薬品1行）。紙に書き戻しやすいように
+function deptCSV(d) {
+  const q = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const rows = [['薬品名', '規格', ...d.locs, '定数', 'チェック', '期限（年月）', '本数', '区分', 'ロット', '備考']];
+  for (const it of d.items) {
+    const r = deptRec(d, it);
+    rows.push([it.name, it.spec, ...d.locs.map(l => it.q[l] ?? ''), it.total, r ? '✓' : '', r?.exp || '', r && r.kind !== 'ok' ? r.n : '', r ? (r.kind === 'ok' ? '' : DEPT_KIND[r.kind]) : '', r?.lot || '', it.note]);
+  }
   return rows.map(r => r.map(q).join(',')).join('\r\n');
 }
 // CSV：薬品名の列の後ろに「YJコード」「照合」を足す（設定でオン・オフ）
@@ -5167,6 +5279,74 @@ const PANELS = {
     };
   },
 
+  dept() {
+    const d = deptCur(), imp = DEPT.imp;
+    const impBlock = `<div class="block">
+        <h3>${d ? '定数表を取り込む（追加・差し替え）' : '部署の定数表を取り込む'}<small>Excel・CSV</small></h3>
+        <label class="btn filebtn${d ? '' : ' primary'}" for="deptFile">ファイルを選ぶ</label>
+        <input type="file" id="deptFile" accept=".xlsx,.xls,.csv,.txt" hidden>
+        ${imp ? `<div class="field"><label>シート<small>${imp.sheets.length}枚</small></label><div class="sizes">${imp.sheets.map((sh, i) => `<button class="seg${imp.si === i ? ' on' : ''}" data-act="deptSheet" data-i="${i}" style="padding:0 10px">${esc(sh.name)}</button>`).join('')}</div></div>
+          ${imp.err ? `<p class="warnline">${esc(imp.err)}</p>` : imp.parsed ? `<p class="muted">${imp.parsed.items.length}品目・場所：${esc(imp.parsed.locs.join('、'))}</p>
+          <div class="field"><label for="deptName">部署名</label><input id="deptName" value="${esc(imp.name ?? imp.parsed.name)}" autocomplete="off"></div>
+          <div class="inline"><button class="btn primary" data-act="deptImport">取り込む</button><button class="btn" data-act="deptImpCancel">やめる</button></div>
+          ${DEPT.depts.some(x => x.name === (imp.name ?? imp.parsed.name)) ? '<p class="muted">同じ名前の部署は差し替えます（それまでのチェック結果は消えます）。</p>' : ''}` : ''}` : ''}
+        <p class="muted">「薬品名」「定数」の見出しの行を探し、その間の列（1号室・棚・救急カートなど）を保管場所として読みます。取り込んだ表はこの端末に保存します。</p>
+      </div>`;
+    if (!d) return { title: '定数・期限チェック', left: `<button class="btn ghost" data-act="close">閉じる</button>`, body: impBlock };
+    const months = expMonths(), q = DEPT.q || '', hits = q.trim() ? deptSearch(d, q) : [];
+    const done = d.items.filter(it => deptRec(d, it)).length;
+    const tagOf = r => !r ? '' : r.kind === 'ok' ? '<span class="tag loc">✓</span>' : `<span class="tag warn">${esc(DEPT_KIND[r.kind])} ${esc(expMonthLabel(r.exp))} ${esc(r.n || '?')}本</span>`;
+    const editor = it => {
+      const r = deptRec(d, it), e = DEPT.edit;
+      return `<div class="dedit">
+        <div class="sizes"><button class="seg${e.kind === 'soon' ? ' on' : ''}" data-act="deptKind" data-v="soon" style="padding:0 12px">期限6か月以内</button><button class="seg${e.kind === 'swap' ? ' on' : ''}" data-act="deptKind" data-v="swap" style="padding:0 12px">交換した</button></div>
+        <div class="field"><label>${e.kind === 'swap' ? '交換後の期限' : '期限'}</label><div class="sizes">${months.map(m => `<button class="seg${e.exp === m ? ' on' : ''}" data-act="deptExp" data-v="${m}" style="padding:0 10px">${expMonthLabel(m).replace(/^\d{4}年/, m.slice(0, 4) === months[0].slice(0, 4) ? '' : m.slice(2, 4) + '年')}</button>`).join('')}</div>
+          <details style="margin-top:6px"${e.exp && !months.includes(e.exp) ? ' open' : ''}><summary class="muted">ほかの月（交換で先の期限など）</summary><input type="month" id="deptExpOther" value="${esc(e.exp || '')}"></details></div>
+        <div class="field"><label for="deptN">本数</label><div class="exp-qty"><button class="btn" data-act="deptStep" data-v="-1">−</button><input id="deptN" inputmode="decimal" value="${esc(e.n ?? '')}"><button class="btn" data-act="deptStep" data-v="1">＋</button><span class="muted">定数 ${esc(it.total)}</span></div></div>
+        <div class="field"><label for="deptLot">ロット（空欄可）</label><input id="deptLot" value="${esc(e.lot || '')}" autocomplete="off" autocorrect="off" spellcheck="false"></div>
+        ${DEPT.err ? `<p class="warnline">${esc(DEPT.err)}</p>` : ''}
+        <div class="inline"><button class="btn primary" data-act="deptSaveRec" data-id="${it.id}">記録する</button><button class="btn" data-act="deptClose">やめる</button>${r ? `<button class="btn ghost danger" data-act="deptClearRec" data-id="${it.id}">未チェックに戻す</button>` : ''}</div>
+      </div>`;
+    };
+    const card = it => {
+      const r = deptRec(d, it), open = DEPT.edit?.id === it.id;
+      return `<div class="drow${r ? ' done' : ''}${open ? ' open' : ''}">
+        <div class="info"><div class="dname">${esc(it.name)}${it.spec ? `<span class="muted" style="font-weight:400"> ${esc(it.spec)}</span>` : ''}${/鍵/.test(it.note) ? '<span class="tag warn">鍵</span>' : ''}${/冷/.test(it.note) ? '<span class="tag loc">冷</span>' : ''}</div>
+          <div class="sub">定数 ${esc(it.total)}${d.locs.filter(l => it.q[l] != null).length ? `（${d.locs.filter(l => it.q[l] != null).map(l => `${esc(l)} ${esc(it.q[l])}`).join('・')}）` : ''} ${tagOf(r)}</div></div>
+        ${open ? editor(it) : `<div class="dbtns"><button class="btn primary dq-ok" data-act="deptOk" data-id="${it.id}">${r?.kind === 'ok' ? '✓ 済' : '✓ 問題なし'}</button><button class="btn" data-act="deptOpen" data-id="${it.id}" data-v="soon">期限が近い</button><button class="btn" data-act="deptOpen" data-id="${it.id}" data-v="swap">交換した</button></div>`}
+      </div>`;
+    };
+    const shown = DEPT.onlyLeft ? d.items.filter(it => !deptRec(d, it)) : d.items;
+    return {
+      title: '定数・期限チェック',
+      left: `<button class="btn ghost" data-act="close">閉じる</button>`,
+      body: `
+        <div class="block dfind">
+          ${DEPT.depts.length > 1 ? `<div class="sizes">${DEPT.depts.map(x => `<button class="seg${x.id === d.id ? ' on' : ''}" data-act="deptPick" data-id="${x.id}" style="padding:0 10px">${esc(x.name)}</button>`).join('')}</div>` : `<h3>${esc(d.name)}</h3>`}
+          <p class="muted" style="margin:0">チェック ${done}/${d.items.length}品目。棚を端から見て、手に取った薬を名前（2〜3文字）かGS1で探してください。</p>
+          ${canScanGS1() ? `<button class="btn primary" data-act="deptGs1" style="min-height:52px">GS1をカメラで読む（無音）</button>` : ''}
+          ${DEPT.note ? `<p class="warnline" role="status">${esc(DEPT.note)}</p>` : ''}
+          <input id="deptQ" value="${esc(q)}" placeholder="名前の一部で探す（例：きしろ、ろぴ）" autocomplete="off" autocorrect="off" spellcheck="false" style="font-size:18px;min-height:48px">
+          <div id="deptHits">${q.trim() ? (hits.map(card).join('') || '<p class="muted">見つかりません</p>') : ''}</div>
+        </div>
+        <div class="block">
+          <h3>まとめ<small>紙に書き戻す内容</small></h3>
+          <pre class="ins-out">${esc(deptText(d))}</pre>
+          <p class="okline" role="status">${esc(DEPT.msg || '')}</p>
+          <div class="inline"><button class="btn primary" data-act="deptCopy">まとめをコピー</button><button class="btn" data-act="deptCsv">CSVを保存（紙と同じ並び）</button>${d.items.some(it => deptRec(d, it)?.kind === 'soon') ? '<button class="btn" data-act="deptToExp">期限6か月以内を期限切迫リストへ</button>' : ''}</div>
+        </div>
+        <div class="block dlist">
+          <h3>表の順（紙と同じ並び）<small><label style="font-weight:400"><input type="checkbox" id="deptOnlyLeft" ${DEPT.onlyLeft ? 'checked' : ''}> 未チェックだけ</label></small></h3>
+          ${shown.map(it => DEPT.edit?.id === it.id && q.trim() && hits.includes(it) ? `<div class="drow"><div class="info"><div class="dname">${esc(it.name)}</div><div class="sub muted">上で入力中</div></div></div>` : card(it)).join('') || '<p class="muted">すべてチェック済みです</p>'}
+        </div>
+        <div class="block">
+          <div class="inline">${DEPT.confirm === 'reset' ? `<button class="btn danger" data-act="deptReset">チェック結果を全部消す</button><button class="btn" data-act="deptNo">やめる</button>` : `<button class="btn ghost" data-act="deptAsk" data-v="reset">新しくチェックを始める</button>`}
+            ${DEPT.confirm === 'del' ? `<button class="btn danger" data-act="deptDel">「${esc(d.name)}」を消す</button><button class="btn" data-act="deptNo">やめる</button>` : `<button class="btn ghost danger" data-act="deptAsk" data-v="del">この部署の表を消す</button>`}</div>
+        </div>
+        ${impBlock}`
+    };
+  },
+
   kyu() {
     const cam = canScanGS1(), rows = KYU.rows, inp = (i, k, v, extra = '') => `<input class="kyu-in" data-kyu="${i}|${k}" value="${esc(v || '')}"${extra}>`;
     return {
@@ -5492,6 +5672,7 @@ const PANELS = {
           <button class="btn" data-act="tblPanel">薬品リスト（表）を読む → CSV</button>
           <button class="btn" data-act="kyuPanel">医師の休診日を読む → CSV・JSON</button>
           <button class="btn" data-act="expPanel">期限切迫薬品リスト（${EXP.items.length}品目）</button>
+          <button class="btn" data-act="deptPanel">部署の定数・期限チェック${DEPT.depts.length ? `（${DEPT.depts.length}部署）` : ''}</button>
           <button class="btn primary" data-act="sessions">患者の保存・再開（保存済み ${sessions.filter(s => s.id !== ui.sid).length}件）</button>
           <button class="btn" data-act="addPanel">＋ 薬を追加（音声・名前検索・手入力）</button>
           ${window.JISHIYAKU_SITE ? `<button class="btn" data-act="ocrPanel">端末内の読み取り（${ocrEngine() === 'ndl' ? 'NDLOCR-Lite' : 'Tesseract'}）</button>` : ''}
@@ -6097,6 +6278,66 @@ const actions = {
   rptCam: () => camOpen('rpt'),
   tblPanel: () => { TBL.note = ''; openPanel({ type: 'tbl' }); },
   kyuPanel: () => { KYU.note = ''; openPanel({ type: 'kyu' }); },
+  deptPanel: () => { DEPT.note = ''; DEPT.edit = null; DEPT.open = null; DEPT.msg = ''; DEPT.confirm = null; openPanel({ type: 'dept' }); },
+  deptSheet: el => { const imp = DEPT.imp; imp.si = +el.dataset.i; imp.name = null; try { imp.parsed = deptParse(imp.sheets[imp.si].rows, imp.file); imp.err = ''; } catch (e) { imp.parsed = null; imp.err = e.message; } renderPanel(); },
+  deptImpCancel: () => { DEPT.imp = null; renderPanel(); },
+  deptImport: () => {
+    const imp = DEPT.imp; if (!imp?.parsed) return;
+    const name = ($('#deptName')?.value || '').trim() || imp.parsed.name;
+    const old = DEPT.depts.find(x => x.name === name);
+    const d = { id: old?.id || uid(), name, file: imp.file, sheet: imp.sheets[imp.si].name, locs: imp.parsed.locs, items: imp.parsed.items, at: Date.now() };
+    if (old) { DEPT.depts[DEPT.depts.indexOf(old)] = d; delete DEPT.chk[d.id]; } else DEPT.depts.push(d);
+    DEPT.cur = d.id; DEPT.loc = d.locs[0]; DEPT.imp = null; DEPT.msg = `「${name}」を取り込みました（${d.items.length}品目）`;
+    deptSave(); renderPanel(true);
+  },
+  deptPick: el => { DEPT.cur = el.dataset.id; DEPT.loc = deptCur()?.locs[0] || ''; DEPT.open = null; DEPT.confirm = null; deptSave(); renderPanel(true); },
+  deptOk: el => {
+    const d = deptCur(), c = DEPT.chk[d.id] || (DEPT.chk[d.id] = { date: Date.now(), rec: {} });
+    c.rec[el.dataset.id] = { kind: 'ok' }; DEPT.edit = null; deptSave(); deptAfter();
+  },
+  deptOpen: el => { const d = deptCur(), it = d.items.find(x => x.id === el.dataset.id), r = deptRec(d, it); DEPT.err = ''; DEPT.edit = { id: it.id, kind: el.dataset.v, exp: r && r.kind !== 'ok' ? r.exp : '', n: r && r.kind !== 'ok' ? r.n : '', lot: r?.lot || '' }; renderPanel(); },
+  deptKind: el => { deptReadEdit(); DEPT.edit.kind = el.dataset.v; renderPanel(); },
+  deptExp: el => { deptReadEdit(); DEPT.edit.exp = el.dataset.v; renderPanel(); setTimeout(() => $('#deptN')?.focus(), 30); },
+  deptStep: el => { const i = $('#deptN'); if (i) i.value = String(Math.max(0, (parseFloat(i.value) || 0) + +el.dataset.v)); },
+  deptClose: () => { DEPT.edit = null; DEPT.err = ''; renderPanel(); },
+  deptSaveRec: el => {
+    deptReadEdit();
+    const d = deptCur(), e = DEPT.edit;
+    if (!e.exp) { DEPT.err = '期限の月を選んでください'; renderPanel(); return; }
+    if (!(parseFloat(e.n) > 0)) { DEPT.err = '本数を入れてください'; renderPanel(); return; }
+    const c = DEPT.chk[d.id] || (DEPT.chk[d.id] = { date: Date.now(), rec: {} });
+    c.rec[e.id] = { kind: e.kind, exp: e.exp, n: String(parseFloat(e.n)), lot: e.lot };
+    DEPT.edit = null; DEPT.err = ''; deptSave(); deptAfter();
+  },
+  deptClearRec: el => { const d = deptCur(); delete DEPT.chk[d.id]?.rec[el.dataset.id]; DEPT.edit = null; deptSave(); renderPanel(); },
+  deptGs1: () => {
+    DEPT.note = '';
+    scanGS1((it0, gtin, raw) => {
+      const d = deptCur(), it = deptMatchItem(d, it0);
+      if (!it) { DEPT.note = `「${it0.n}」は${d.name}の定数表に見つかりません。名前で探してください`; DEPT.q = ''; renderPanel(); return; }
+      DEPT.q = it.name; DEPT.note = '';
+      const ex = parseGS1Extra(raw);
+      if (ex.month) { DEPT.edit = { id: it.id, kind: 'soon', exp: ex.month, n: '', lot: ex.lot || '' }; }
+      renderPanel(true);
+    });
+  },
+  deptCopy: async () => { try { await navigator.clipboard.writeText(deptText(deptCur())); DEPT.msg = 'まとめをコピーしました'; } catch (e) { DEPT.msg = 'コピーできませんでした。上の文を長押しして選択してください'; } renderPanel(); },
+  deptCsv: () => { const d = deptCur(); saveFile(`定数チェック_${d.name}_${ymd()}.csv`, '﻿' + deptCSV(d), 'text/csv;charset=utf-8'); DEPT.msg = 'CSVを保存しました（紙と同じ並び・Excelで開けます）'; renderPanel(); },
+  deptToExp: () => {
+    const d = deptCur(); let n = 0;
+    for (const it of d.items) {
+      const r = deptRec(d, it); if (r?.kind !== 'soon') continue;
+      const rec = { id: uid(), name: deptLabel(it), yj: '', gtin: '', qty: r.n, unit: '本', month: r.exp, lot: r.lot || '', loc: d.name };
+      if (EXP.items.some(e => e.name === rec.name && e.month === rec.month && e.loc === rec.loc)) continue;
+      EXP.items.push(rec); n++;
+    }
+    expSave(); DEPT.msg = n ? `期限切迫薬品リストに${n}件送りました` : 'すでに送ってあります'; renderPanel();
+  },
+  deptAsk: el => { DEPT.confirm = el.dataset.v; renderPanel(); },
+  deptNo: () => { DEPT.confirm = null; renderPanel(); },
+  deptReset: () => { const d = deptCur(); delete DEPT.chk[d.id]; DEPT.confirm = null; DEPT.msg = 'チェック結果を消しました'; deptSave(); renderPanel(true); },
+  deptDel: () => { const d = deptCur(); DEPT.depts = DEPT.depts.filter(x => x.id !== d.id); delete DEPT.chk[d.id]; DEPT.cur = DEPT.depts[0]?.id || ''; DEPT.confirm = null; deptSave(); renderPanel(true); },
+
   expPanel: () => { EXP.draft = null; EXP.msg = ''; EXP.note = ''; ui.note = ''; openPanel({ type: 'exp' }); },
   expGs1: () => { ui.note = ''; scanGS1((it, gtin, raw) => { EXP.draft = expNew(it, gtin, raw); EXP.note = ''; if (ui.panel?.type !== 'exp') openPanel({ type: 'exp' }); else renderPanel(true); setTimeout(() => $('#expQty')?.focus(), 80); }); },
   expPick: el => { const c = EXP.cands?.[+el.dataset.i]; if (!c) return; EXP.draft = expNew(c); EXP.note = ''; renderPanel(true); setTimeout(() => $('#expQty')?.focus(), 80); },
@@ -6349,6 +6590,12 @@ document.addEventListener('input', e => {
     if (it && t.value.trim() !== '' && isFinite(parseFloat(t.value))) { it.qty = String(parseFloat(t.value)); expSave(); }
     return;
   }
+  if (t.id === 'deptQ' && ui.panel?.type === 'dept') {
+    DEPT.q = t.value; DEPT.edit = null;
+    const d = deptCur(), box = $('#deptHits');
+    if (box && d) { const tp = document.createElement('template'); tp.innerHTML = PANELS.dept().body; box.innerHTML = tp.content.querySelector('#deptHits')?.innerHTML || ''; }
+    return;
+  }
   if (t.id === 'expSearch' && ui.panel?.type === 'exp') {
     EXP.q = t.value;
     const box = $('#expCands'); if (box) { box.innerHTML = expCandHTML(); box.scrollTop = 0; }
@@ -6452,6 +6699,17 @@ document.addEventListener('change', async e => {
   if (e.target.classList?.contains('insPrepDate') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].until = isoToMD(e.target.value); rptApplyInstr(); return; }
   if (e.target.classList?.contains('insPrepRemain') && RPT.instr) { RPT.instr.preps[+e.target.dataset.i].remain = e.target.checked; rptApplyInstr(); return; }
   if (e.target.id === 'insExtra' && RPT.instr) { RPT.instr.extra = e.target.value.split('\n').map(x => x.trim()).filter(Boolean); rptApplyInstr(); return; }
+  if (e.target.id === 'deptOnlyLeft') { DEPT.onlyLeft = e.target.checked; renderPanel(); return; }
+  if (e.target.id === 'deptFile' && e.target.files.length) {
+    const f = e.target.files[0]; e.target.value = '';
+    try {
+      const sheets = (await deptReadBook(f)).filter(sh => sh.rows.length);
+      const base = f.name.replace(/\.[^.]+$/, '');
+      DEPT.imp = { file: f.name, sheets, si: 0, name: null, parsed: null, err: '' };
+      try { DEPT.imp.parsed = deptParse(sheets[0].rows, base); } catch (err) { DEPT.imp.err = err.message; }
+    } catch (err) { DEPT.imp = { file: f.name, sheets: [], si: 0, err: err.message || String(err) }; }
+    renderPanel(); return;
+  }
   if (e.target.id === 'kyuFile' && e.target.files.length) {
     const files = [...e.target.files]; e.target.value = '';
     for (const f of files) kyuImage(f);
